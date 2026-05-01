@@ -2,6 +2,9 @@
 
 AI 作业资料与实验报告工作台。当前 MVP 包含 Next.js 前端、Spring Boot 编排后端、FastAPI Agent 服务、MySQL、Redis 和 ChromaDB，可用于创建作业、上传 PDF/Markdown 资料、生成报告并实时查看任务日志。
 
+<img width="1914" height="981" alt="image" src="https://github.com/user-attachments/assets/0b9c08ad-533d-4196-ac64-80139ff93107" />
+
+
 ## 功能概览
 
 - 作业管理：创建作业并维护作业说明。
