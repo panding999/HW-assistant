@@ -1,0 +1,34 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: fzu-homework-assistant
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/fzu_homework?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false}
+    username: ${SPRING_DATASOURCE_USERNAME:fzu}
+    password: ${SPRING_DATASOURCE_PASSWORD:fzu_password}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 80MB
+  jackson:
+    time-zone: Asia/Shanghai
+  sql:
+    init:
+      mode: always
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+
+agent:
+  base-url: ${AGENT_BASE_URL:http://localhost:8000}
+
+storage:
+  upload-dir: ${STORAGE_UPLOAD_DIR:storage/uploads}

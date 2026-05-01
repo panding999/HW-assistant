@@ -1,0 +1,109 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: fzu-hw-mysql
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-fzu_homework}
+      MYSQL_USER: ${MYSQL_USER:-fzu}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fzu_password}
+    command: ["--default-time-zone=+08:00"]
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} && mysql -h localhost -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} $${MYSQL_DATABASE} -e 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: fzu-hw-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    container_name: fzu-hw-chromadb
+    ports:
+      - "${CHROMA_PORT:-8001}:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+
+  agent-python:
+    build:
+      context: ./agent-python
+    container_name: fzu-hw-agent
+    environment:
+      TZ: Asia/Shanghai
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
+      LLM_PROVIDER: ${LLM_PROVIDER:-qwen}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v2}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "${AGENT_PORT:-8000}:8000"
+    volumes:
+      - uploads_data:/app/storage/uploads
+    depends_on:
+      - chromadb
+
+  backend-java:
+    build:
+      context: ./backend-java
+    container_name: fzu-hw-backend
+    environment:
+      TZ: Asia/Shanghai
+      JAVA_TOOL_OPTIONS: -Duser.timezone=Asia/Shanghai
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-fzu_homework}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-fzu}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-fzu_password}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      AGENT_BASE_URL: http://agent-python:8000
+      STORAGE_UPLOAD_DIR: /app/storage/uploads
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    restart: on-failure
+    volumes:
+      - uploads_data:/app/storage/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      agent-python:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    container_name: fzu-hw-frontend
+    environment:
+      TZ: Asia/Shanghai
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend-java
+
+volumes:
+  mysql_data:
+  redis_data:
+  chroma_data:
+  uploads_data:
