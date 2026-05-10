@@ -7,6 +7,7 @@ public class AssignmentRequest {
     private String course;
     private String description;
     private LocalDateTime dueAt;
+    private String skillId;
 
     public String getTitle() { return title; }
     public void setTitle(String title) { this.title = title; }
@@ -16,4 +17,6 @@ public class AssignmentRequest {
     public void setDescription(String description) { this.description = description; }
     public LocalDateTime getDueAt() { return dueAt; }
     public void setDueAt(LocalDateTime dueAt) { this.dueAt = dueAt; }
+    public String getSkillId() { return skillId; }
+    public void setSkillId(String skillId) { this.skillId = skillId; }
 }

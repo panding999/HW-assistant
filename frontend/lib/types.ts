@@ -4,6 +4,8 @@ export type Assignment = {
   course?: string;
   description?: string;
   dueAt?: string;
+  skillId?: string;
+  resolvedSkillId?: string;
   status: "DRAFT" | "READY" | "DONE" | string;
   createdAt?: string;
 };

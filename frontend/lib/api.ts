@@ -45,6 +45,7 @@ export const api = {
     course?: string;
     description?: string;
     dueAt?: string;
+    skillId?: string;
   }) =>
     request<Assignment>("/api/assignments", {
       method: "POST",
@@ -57,6 +58,7 @@ export const api = {
       course?: string;
       description?: string;
       dueAt?: string;
+      skillId?: string;
     }
   ) =>
     request<Assignment>(`/api/assignments/${id}`, {

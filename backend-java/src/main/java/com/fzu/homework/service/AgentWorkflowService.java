@@ -17,13 +17,22 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.time.LocalDateTime;
+import java.util.Set;
 
 @Service
 public class AgentWorkflowService {
+    private static final String AUTO_SKILL = "AUTO";
+    private static final Set<String> VALID_RESOLVED_SKILLS = Set.of(
+            "lab_report",
+            "paper_summary",
+            "course_qa_report",
+            "dynamic_planner"
+    );
+
     private final AgentTaskMapper taskMapper;
     private final AssignmentMapper assignmentMapper;
     private final MaterialMapper materialMapper;
@@ -100,8 +109,7 @@ public class AgentWorkflowService {
             }
 
             List<Material> materials = materialMapper.selectList(
-                    Wrappers.<Material>lambdaQuery()
-                            .eq(Material::getAssignmentId, assignment.getId())
+                    Wrappers.<Material>lambdaQuery().eq(Material::getAssignmentId, assignment.getId())
             );
             if (materials.isEmpty()) {
                 throw new IllegalStateException("Please upload at least one material before generating a report.");
@@ -114,6 +122,7 @@ public class AgentWorkflowService {
                 material.setErrorMessage(null);
                 materialMapper.updateById(material);
             });
+
             Map<String, Object> indexPayload = new LinkedHashMap<>();
             indexPayload.put("assignment_id", assignment.getId());
             indexPayload.put("title", assignment.getTitle());
@@ -135,6 +144,7 @@ public class AgentWorkflowService {
                 materialMapper.updateById(material);
             });
             taskLogService.push(taskId, currentStage, "SUCCEEDED", "资料解析完成，已向量化 " + chunks + " 个资料片段。");
+
             currentStage = "retrieve";
             taskLogService.push(taskId, currentStage, "RUNNING", "正在执行 RAG 检索。");
 
@@ -143,11 +153,13 @@ public class AgentWorkflowService {
             reportPayload.put("title", assignment.getTitle());
             reportPayload.put("course", assignment.getCourse());
             reportPayload.put("description", assignment.getDescription());
+            reportPayload.put("skill_id", effectiveSkillId(assignment));
             reportPayload.put("top_k", 8);
 
             taskLogService.push(taskId, currentStage, "SUCCEEDED", "已检索到相关资料，准备生成报告。");
+
             currentStage = "generate";
-            taskLogService.push(taskId, currentStage, "RUNNING", "正在调用 Qwen 生成实验报告草稿。");
+            taskLogService.push(taskId, currentStage, "RUNNING", "正在调用 Agent 生成报告草稿。");
             Map<?, ?> reportResponse = restClient.post()
                     .uri("/agent/generate-report")
                     .contentType(MediaType.APPLICATION_JSON)
@@ -155,12 +167,19 @@ public class AgentWorkflowService {
                     .body(toJson(reportPayload))
                     .retrieve()
                     .body(Map.class);
+
             Object markdownValue = reportResponse == null ? "" : reportResponse.get("markdown");
             String markdown = markdownValue == null ? "" : String.valueOf(markdownValue);
+            String resolvedSkillId = normalizeResolvedSkillId(valueOf(reportResponse, "resolved_skill_id", "lab_report"));
+            String routingMode = valueOf(reportResponse, "routing_mode", "known_skill");
+            double routingConfidence = doubleValue(reportResponse, "routing_confidence", 1.0);
+            String routingReason = valueOf(reportResponse, "routing_reason", "No routing reason returned.");
 
             upsertReport(assignment, markdown);
+            assignment.setResolvedSkillId(resolvedSkillId);
             assignment.setStatus("DONE");
             assignmentMapper.updateById(assignment);
+
             AgentTask completed = taskMapper.selectById(taskId);
             if (completed != null) {
                 completed.setStatus("SUCCEEDED");
@@ -169,7 +188,9 @@ public class AgentWorkflowService {
                 completed.setErrorMessage(null);
                 taskMapper.updateById(completed);
             }
-            taskLogService.push(taskId, currentStage, "SUCCEEDED", "报告草稿已生成，可以开始编辑。");
+
+            taskLogService.push(taskId, "skill", "SUCCEEDED", routingMessage(resolvedSkillId, routingMode, routingConfidence, routingReason));
+            taskLogService.push(taskId, currentStage, "SUCCEEDED", "已使用 " + skillLabel(resolvedSkillId) + " 生成草稿，可以开始编辑。");
             taskLogService.push(taskId, "done", "SUCCEEDED", "任务完成。");
         } catch (Exception ex) {
             String friendlyMessage = friendlyError(ex.getMessage());
@@ -231,6 +252,53 @@ public class AgentWorkflowService {
         return payload;
     }
 
+    private String effectiveSkillId(Assignment assignment) {
+        String requested = assignment.getSkillId();
+        return requested == null || requested.isBlank() ? AUTO_SKILL : requested;
+    }
+
+    private String valueOf(Map<?, ?> body, String key, String fallback) {
+        Object value = body == null ? null : body.get(key);
+        return value == null ? fallback : String.valueOf(value);
+    }
+
+    private double doubleValue(Map<?, ?> body, String key, double fallback) {
+        Object value = body == null ? null : body.get(key);
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (value != null) {
+            try {
+                return Double.parseDouble(String.valueOf(value));
+            } catch (NumberFormatException ignored) {
+                return fallback;
+            }
+        }
+        return fallback;
+    }
+
+    private String normalizeResolvedSkillId(String value) {
+        return VALID_RESOLVED_SKILLS.contains(value) ? value : "lab_report";
+    }
+
+    private String routingMessage(String skillId, String mode, double confidence, String reason) {
+        String percent = String.format("%.0f%%", confidence * 100);
+        if ("dynamic_plan".equals(mode)) {
+            return "Skill 路由：未高置信命中固定 Skill，进入动态规划。置信度 " + percent + "。原因：" + reason;
+        }
+        return "Skill 路由：命中 " + skillLabel(skillId) + "，置信度 " + percent + "。原因：" + reason;
+    }
+
+    private String skillLabel(String skillId) {
+        return switch (skillId == null ? AUTO_SKILL : skillId) {
+            case "paper_summary" -> "论文总结";
+            case "course_qa_report" -> "课程问答汇报";
+            case "lab_report" -> "实验报告";
+            case "dynamic_planner" -> "动态规划";
+            default -> "智能识别";
+        };
+    }
+
     private void upsertReport(Assignment assignment, String markdown) {
         Report report = reportMapper.selectOne(
                 Wrappers.<Report>lambdaQuery().eq(Report::getAssignmentId, assignment.getId())
@@ -238,7 +306,7 @@ public class AgentWorkflowService {
         if (report == null) {
             report = new Report();
             report.setAssignmentId(assignment.getId());
-            report.setTitle(assignment.getTitle() + " 实验报告");
+            report.setTitle(assignment.getTitle() + " 报告");
             report.setMarkdown(markdown);
             report.setVersion(1);
             reportMapper.insert(report);

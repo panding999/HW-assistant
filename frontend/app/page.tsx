@@ -22,6 +22,7 @@ import {
   Save,
   Search,
   Settings,
+  Sparkles,
   Sun,
   Trash2,
   Upload,
@@ -49,6 +50,8 @@ const demoAssignments: Assignment[] = [
     course: "计算机视觉",
     description: "完成一个人脸识别实验，上传实验要求、论文或课件后生成报告草稿。",
     dueAt: "2026-05-08T23:59:00",
+    skillId: "AUTO",
+    resolvedSkillId: "lab_report",
     status: "READY"
   },
   {
@@ -57,6 +60,7 @@ const demoAssignments: Assignment[] = [
     course: "计算机视觉",
     description: "构建 CNN 分类器并分析训练结果。",
     dueAt: "2026-05-08T23:59:00",
+    skillId: "AUTO",
     status: "DRAFT"
   },
   {
@@ -65,6 +69,7 @@ const demoAssignments: Assignment[] = [
     course: "计算机视觉",
     description: "实现基础图像分割方法并完成对比分析。",
     dueAt: "2026-05-10T23:59:00",
+    skillId: "AUTO",
     status: "DRAFT"
   }
 ];
@@ -124,6 +129,12 @@ const initialSummary: DashboardSummary = {
   overdue: 3
 };
 
+const skillOptions = [
+  { value: "lab_report", label: "实验报告" },
+  { value: "paper_summary", label: "论文总结" },
+  { value: "course_qa_report", label: "课程问答" }
+];
+
 export default function HomePage() {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const refreshInFlight = useRef(false);
@@ -156,7 +167,8 @@ export default function HomePage() {
     title: "",
     course: "",
     description: "",
-    dueAt: ""
+    dueAt: "",
+    skillId: "AUTO"
   });
 
   const selected = useMemo(
@@ -261,6 +273,7 @@ export default function HomePage() {
     }
 
     const detail: AssignmentDetail = await api.assignmentDetail(id);
+    setAssignments((current) => current.map((assignment) => assignment.id === id ? detail.assignment : assignment));
     setMaterials(detail.materials);
     setReport(detail.report ?? null);
     setMarkdown(normalizeMarkdown(detail.report?.markdown ?? ""));
@@ -295,13 +308,14 @@ export default function HomePage() {
         title: draft.title,
         course: draft.course,
         description: draft.description,
-        dueAt: draft.dueAt || undefined
+        dueAt: draft.dueAt || undefined,
+        skillId: draft.skillId
       };
       const saved =
         formMode === "edit" && selected && !isDemo
           ? await api.updateAssignment(selected.id, payload)
           : await api.createAssignment(payload);
-      setDraft({ title: "", course: "", description: "", dueAt: "" });
+      setDraft({ title: "", course: "", description: "", dueAt: "", skillId: "AUTO" });
       setFormMode("create");
       await refresh();
       setSelectedId(saved.id);
@@ -321,7 +335,8 @@ export default function HomePage() {
       title: selected.title,
       course: selected.course || "",
       description: selected.description || "",
-      dueAt: selected.dueAt ? selected.dueAt.slice(0, 16) : ""
+      dueAt: selected.dueAt ? selected.dueAt.slice(0, 16) : "",
+      skillId: selected.skillId || "AUTO"
     });
   }
 
@@ -445,19 +460,19 @@ export default function HomePage() {
 
   return (
     <main className="min-h-screen">
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-[88px] border-r border-slate-200 bg-white/88 backdrop-blur xl:flex xl:flex-col xl:items-center xl:py-8 dark:border-slate-800 dark:bg-slate-950">
-        <div className="mb-12 flex h-11 w-11 items-center justify-center rounded-lg bg-moss-700 text-white shadow-sm">
-          <Workflow size={24} />
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-16 border-r border-slate-200 bg-white/88 backdrop-blur xl:flex xl:flex-col xl:items-center xl:py-5 dark:border-slate-800 dark:bg-slate-950">
+        <div className="mb-10 flex h-10 w-10 items-center justify-center rounded-lg bg-moss-700 text-white shadow-sm">
+          <Workflow size={21} />
         </div>
-        <nav className="flex flex-1 flex-col items-center gap-5">
+        <nav className="flex flex-1 flex-col items-center gap-4">
           {[Home, Folder, FileText, BarChart3, Settings].map((Icon, index) => (
             <button
               key={index}
-              className={`flex h-11 w-11 items-center justify-center rounded-lg ${
+              className={`flex h-10 w-10 items-center justify-center rounded-lg ${
                 index === 0 ? "bg-moss-700 text-white" : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
               }`}
             >
-              <Icon size={21} />
+              <Icon size={19} />
             </button>
           ))}
         </nav>
@@ -466,11 +481,11 @@ export default function HomePage() {
         </Button>
       </aside>
 
-      <section className="px-4 py-4 sm:px-8 xl:ml-[88px] xl:h-screen xl:overflow-hidden xl:px-8 xl:pb-5">
-        <header className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <section className="px-4 py-3 sm:px-6 xl:ml-16 xl:h-screen xl:overflow-hidden xl:px-6 xl:pb-5">
+        <header className="mb-2 flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">FZU HOMEWORK ASSISTANT</p>
-            <h1 className="mt-1 text-2xl font-bold tracking-normal text-slate-950 sm:text-3xl">作业资料工作台</h1>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">FZU HOMEWORK ASSISTANT</p>
+            <h1 className="mt-0.5 text-2xl font-bold tracking-normal text-slate-950">作业资料工作台</h1>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto lg:flex-nowrap lg:justify-end">
             <div className="flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs shadow-sm dark:border-slate-700 dark:bg-slate-900">
@@ -504,7 +519,7 @@ export default function HomePage() {
           </div>
         </header>
 
-        <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <section className="grid gap-2.5 md:grid-cols-2 xl:grid-cols-4">
           <Metric icon={BookOpen} value={summary.assignments} label="作业总数" hint="全部作业" />
           <Metric icon={Folder} value={summary.materials} label="匹配资料" hint="资源库" />
           <Metric icon={FileText} value={summary.reports} label="报告草稿" hint="已生成" tone="blue" />
@@ -513,32 +528,32 @@ export default function HomePage() {
 
         {error && <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">{error}</div>}
 
-        <section className="mt-3 grid gap-4 xl:h-[calc(100vh-220px)] xl:min-h-0 xl:grid-cols-[360px_minmax(460px,1fr)_minmax(400px,0.86fr)]">
-          <Card className="flex min-h-[680px] flex-col p-4 xl:min-h-0 xl:overflow-hidden">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="flex items-center gap-2 font-semibold">
-                <Folder size={18} />
+        <section className="mt-2.5 grid gap-3 border-b border-slate-200 pb-3 xl:h-[calc(100vh-162px)] xl:min-h-0 xl:grid-cols-[300px_minmax(520px,1.08fr)_minmax(460px,0.92fr)]">
+          <Card className="flex min-h-[660px] flex-col p-3 xl:min-h-0 xl:overflow-hidden">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <Folder size={16} />
                 作业队列
               </h2>
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-600">{assignments.length}</span>
+              <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-600">{assignments.length}</span>
             </div>
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
               {assignments.map((assignment) => (
                 <button
                   key={assignment.id}
                   onClick={() => setSelectedId(assignment.id)}
-                  className={`w-full rounded-lg border p-4 text-left transition ${
+                  className={`w-full rounded-lg border p-3 text-left transition ${
                     selected?.id === assignment.id ? "border-moss-600 bg-moss-50 dark:bg-moss-800/30" : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
                   }`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <h3 className="font-semibold text-slate-950">{assignment.title}</h3>
-                      <p className="mt-2 text-sm text-slate-500">{assignment.course || "未设置课程"}</p>
+                      <h3 className="text-sm font-semibold text-slate-950">{assignment.title}</h3>
+                      <p className="mt-1.5 text-xs text-slate-500">{assignment.course || "未设置课程"}</p>
                     </div>
                     <StatusBadge status={assignment.status} />
                   </div>
-                  <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+                  <div className="mt-2.5 flex items-center justify-between text-xs text-slate-500">
                     <span>截止：{formatDue(assignment.dueAt)}</span>
                     <ChevronRight size={17} className="text-slate-900" />
                   </div>
@@ -546,27 +561,64 @@ export default function HomePage() {
               ))}
             </div>
 
-            <div className="mt-5 border-t border-slate-100 pt-4">
-              <div className="mb-3 flex items-center justify-between">
+            <div className="mt-2.5 border-t border-slate-100 pt-2.5">
+              <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-900">{formMode === "edit" ? "编辑作业" : "新建作业"}</h3>
                 {formMode === "edit" && (
                   <button className="text-xs text-slate-500 hover:text-slate-900" onClick={() => {
                     setFormMode("create");
-                    setDraft({ title: "", course: "", description: "", dueAt: "" });
+                    setDraft({ title: "", course: "", description: "", dueAt: "", skillId: "AUTO" });
                   }}>
                     取消
                   </button>
                 )}
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <input className="field" placeholder="作业标题" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
                 <input className="field" placeholder="课程名称" value={draft.course} onChange={(event) => setDraft({ ...draft, course: event.target.value })} />
+                <div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="block text-xs font-medium text-slate-600">任务类型</span>
+                    <span className="rounded-full bg-moss-50 px-2 py-0.5 text-[10px] font-medium text-moss-700">可自动路由</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDraft({ ...draft, skillId: "AUTO" })}
+                    className={`flex h-9 w-full items-center justify-between rounded-lg border px-2.5 text-left text-xs transition ${
+                      draft.skillId === "AUTO"
+                        ? "border-moss-700 bg-moss-50 text-moss-800 shadow-sm"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-moss-300 hover:bg-moss-50/60 dark:border-slate-700 dark:bg-slate-900"
+                    }`}
+                  >
+                    <span className="flex min-w-0 items-center gap-2 font-semibold">
+                      <Sparkles size={14} className="shrink-0" />
+                      智能识别
+                    </span>
+                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] text-moss-700 shadow-sm">推荐</span>
+                  </button>
+                  <div className="mt-1 grid grid-cols-3 gap-1">
+                    {skillOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setDraft({ ...draft, skillId: option.value })}
+                        className={`h-7 rounded-md border px-1.5 text-[11px] font-medium transition ${
+                          draft.skillId === option.value
+                            ? "border-moss-700 bg-moss-700 text-white shadow-sm"
+                            : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-950 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <label className="block">
                   <span className="mb-1 block text-xs font-medium text-slate-600">截止时间</span>
                   <input className="field" type="datetime-local" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} />
                 </label>
-                <textarea className="field min-h-20 resize-none" placeholder="作业说明" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
-                <Button className="w-full" variant="primary" onClick={submitAssignment} disabled={isBusy}>
+                <textarea className="field min-h-16 resize-none" placeholder="作业说明" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
+                <Button className="h-9 w-full text-xs" variant="primary" onClick={submitAssignment} disabled={isBusy}>
                   {formMode === "edit" ? <Save size={17} /> : <Plus size={17} />}
                   {formMode === "edit" ? "保存修改" : "创建作业"}
                 </Button>
@@ -574,12 +626,12 @@ export default function HomePage() {
             </div>
           </Card>
 
-          <Card className="flex min-h-[720px] flex-col overflow-hidden xl:min-h-0">
-            <div className="border-b border-slate-100 p-5">
+          <Card className="flex min-h-[700px] flex-col overflow-hidden xl:min-h-0">
+            <div className="border-b border-slate-100 p-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-xs font-semibold text-moss-700">{selected?.course || "课程概览"}</p>
-                  <h2 className="mt-2 text-2xl font-bold text-slate-950">{selected?.title}</h2>
+                  <h2 className="mt-1 text-xl font-bold text-slate-950">{selected?.title}</h2>
                 </div>
                 <div className="flex items-center gap-2">
                   <StatusBadge status={activeTask?.status || selected?.status || "DRAFT"} />
@@ -591,42 +643,44 @@ export default function HomePage() {
                   </Button>
                 </div>
               </div>
-              <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-                <div className="mb-3 grid gap-3 border-b border-slate-100 pb-3 sm:grid-cols-3">
+              <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3.5 dark:border-slate-800 dark:bg-slate-900">
+                <div className="mb-3 grid gap-3 border-b border-slate-100 pb-3 sm:grid-cols-2 xl:grid-cols-5">
                   <InfoItem label="课程" value={selected?.course || "未设置"} />
                   <InfoItem label="截止时间" value={formatDue(selected?.dueAt)} tone={isOverdue(selected?.dueAt) ? "red" : "default"} />
                   <InfoItem label="资料数量" value={`${materials.length} 条`} />
+                  <InfoItem label="选择类型" value={skillLabel(selected?.skillId)} />
+                  <InfoItem label="实际执行" value={skillLabel(selected?.resolvedSkillId)} />
                 </div>
-                <h3 className="mb-2 font-semibold text-moss-700">作业说明</h3>
-                <p className="whitespace-pre-line text-sm leading-7 text-slate-600">{selected?.description || "暂无作业说明。"}</p>
+                <h3 className="mb-1.5 text-sm font-semibold text-moss-700">作业说明</h3>
+                <p className="whitespace-pre-line text-sm leading-6 text-slate-600">{selected?.description || "暂无作业说明。"}</p>
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto p-5">
-              <h3 className="mb-4 text-lg font-semibold">AI 工作流程</h3>
-              <div className="space-y-4">
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              <h3 className="mb-3 text-lg font-semibold">AI 工作流程</h3>
+              <div className="space-y-3.5 rounded-lg border border-slate-100 bg-white/60 p-3 dark:border-slate-800 dark:bg-slate-900/60">
                 {visibleLogs.length ? visibleLogs.map((log, index) => (
-                  <div key={`${log.stage}-${index}`} className="grid grid-cols-[24px_1fr_auto] items-start gap-4">
+                  <div key={`${log.stage}-${index}`} className="grid grid-cols-[24px_1fr_auto] items-start gap-3">
                     <StepIcon status={log.status} />
                     <div>
-                      <p className="font-medium text-slate-900">{stageLabel(log.stage)}</p>
-                      <p className="mt-1 text-sm text-slate-500">{log.message}</p>
+                      <p className="text-sm font-semibold text-slate-900">{stageLabel(log.stage)}</p>
+                      <p className="mt-1 text-xs leading-5 text-slate-500">{log.message}</p>
                     </div>
-                    <span className="rounded-full bg-slate-50 px-3 py-1 text-xs text-slate-500">{statusText(log.status)}</span>
+                    <span className="rounded-full bg-slate-50 px-2.5 py-0.5 text-xs text-slate-500">{statusText(log.status)}</span>
                   </div>
                 )) : (
                   <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">还没有生成任务。</p>
                 )}
               </div>
 
-              <div className="mt-6">
-                <Button variant="primary" onClick={generateReport} disabled={isBusy}>
+              <div className="mt-4">
+                <Button className="h-9 px-3 text-xs" variant="primary" onClick={generateReport} disabled={isBusy}>
                   <FileText size={17} />
                   生成当前报告草稿
                 </Button>
               </div>
 
-              <div className="mt-7 border-t border-slate-100 pt-5">
+              <div className="mt-5 border-t border-slate-100 pt-4">
                 <div className="mb-3 flex items-center justify-between">
                   <h3 className="font-semibold">任务历史</h3>
                   <span className="text-sm text-slate-500">{taskHistory.length} 条</span>
@@ -658,7 +712,7 @@ export default function HomePage() {
                 )}
               </div>
 
-              <div className="mt-7">
+              <div className="mt-5">
                 <div className="mb-3 flex items-center justify-between">
                   <div>
                     <h3 className="font-semibold">相关资料</h3>
@@ -708,10 +762,10 @@ export default function HomePage() {
             </div>
           </Card>
 
-          <Card className="flex min-h-[720px] flex-col overflow-hidden xl:min-h-0">
-            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-              <h2 className="flex items-center gap-2 font-semibold">
-                <FileText size={18} />
+          <Card className="flex min-h-[700px] flex-col overflow-hidden xl:min-h-0">
+            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <FileText size={16} />
                 报告草稿
               </h2>
               <div className="flex items-center gap-2">
@@ -721,8 +775,8 @@ export default function HomePage() {
                     <p>{formatDateTime(report.updatedAt)}</p>
                   </div>
                 )}
-                <Button size="sm" variant={reportMode === "preview" ? "primary" : "outline"} onClick={() => setReportMode("preview")}>预览</Button>
-                <Button size="sm" variant={reportMode === "edit" ? "primary" : "outline"} onClick={() => setReportMode("edit")}>编辑</Button>
+                <Button className="h-8 px-2.5 text-xs" size="sm" variant={reportMode === "preview" ? "primary" : "outline"} onClick={() => setReportMode("preview")}>预览</Button>
+                <Button className="h-8 px-2.5 text-xs" size="sm" variant={reportMode === "edit" ? "primary" : "outline"} onClick={() => setReportMode("edit")}>编辑</Button>
                 <Button size="sm" variant="primary" onClick={saveReport} disabled={!report || report.id < 0 || isBusy}>
                   <Save size={15} />
                   保存
@@ -735,12 +789,12 @@ export default function HomePage() {
             </div>
             {reportMode === "edit" ? (
               <textarea
-                className="min-h-0 flex-1 resize-none border-0 bg-white p-5 font-mono text-sm leading-7 text-slate-900 outline-none dark:bg-slate-900 dark:text-slate-100"
+                className="min-h-0 flex-1 resize-none border-0 bg-white p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none dark:bg-slate-900 dark:text-slate-100"
                 value={markdown}
                 onChange={(event) => setMarkdown(event.target.value)}
               />
             ) : (
-              <div className="markdown-preview min-h-0 flex-1 overflow-auto p-5">
+              <div className="markdown-preview min-h-0 flex-1 overflow-auto p-4">
                 {markdown ? (
                   <ReactMarkdown>{markdown}</ReactMarkdown>
                 ) : (
@@ -759,18 +813,18 @@ function Metric({ icon: Icon, value, label, hint, tone = "green" }: { icon: Luci
   const toneClass =
     tone === "red" ? "bg-red-50 text-red-700" : tone === "blue" ? "bg-sky-50 text-sky-700" : "bg-moss-50 text-moss-700";
   return (
-    <Card className="flex min-h-[82px] items-center justify-between p-4">
+    <Card className="flex min-h-[64px] items-center justify-between p-3">
       <div className="flex items-center gap-3">
-        <div className={`flex h-11 w-11 items-center justify-center rounded-full ${toneClass}`}>
-          <Icon size={21} />
+        <div className={`flex h-9 w-9 items-center justify-center rounded-full ${toneClass}`}>
+          <Icon size={18} />
         </div>
         <div>
-          <p className="text-2xl font-bold text-slate-950">{value}</p>
-          <p className="text-sm font-medium text-slate-700">{label}</p>
-          <p className="text-xs text-slate-500">{hint}</p>
+          <p className="text-xl font-bold leading-5 text-slate-950">{value}</p>
+          <p className="mt-1 text-xs font-medium text-slate-700">{label}</p>
+          <p className="text-[11px] text-slate-500">{hint}</p>
         </div>
       </div>
-      <ChevronRight size={18} className="text-slate-500" />
+      <ChevronRight size={16} className="text-slate-500" />
     </Card>
   );
 }
@@ -778,8 +832,8 @@ function Metric({ icon: Icon, value, label, hint, tone = "green" }: { icon: Luci
 function InfoItem({ label, value, tone = "default" }: { label: string; value: string; tone?: "default" | "red" }) {
   return (
     <div>
-      <p className="text-xs text-slate-500">{label}</p>
-      <p className={`mt-1 text-sm font-medium ${tone === "red" ? "text-red-700" : "text-slate-900"}`}>{value}</p>
+      <p className="text-[11px] text-slate-500">{label}</p>
+      <p className={`mt-0.5 text-sm font-medium leading-5 ${tone === "red" ? "text-red-700" : "text-slate-900"}`}>{value}</p>
     </div>
   );
 }
@@ -794,14 +848,14 @@ function StatusBadge({ status }: { status?: string }) {
         : normalized === "RUNNING" || normalized === "READY" || normalized === "INDEXING"
           ? "bg-emerald-50 text-emerald-700"
           : "bg-slate-100 text-slate-600";
-  return <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${className}`}>{statusText(normalized)}</span>;
+  return <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${className}`}>{statusText(normalized)}</span>;
 }
 
 function StepIcon({ status }: { status: string }) {
-  if (status === "SUCCEEDED") return <CheckCircle2 size={20} className="text-moss-700" />;
-  if (status === "FAILED") return <Circle size={20} className="text-red-600" />;
-  if (status === "RUNNING") return <Loader2 size={20} className="animate-spin text-moss-700" />;
-  return <Circle size={20} className="text-slate-400" />;
+  if (status === "SUCCEEDED") return <CheckCircle2 size={19} className="text-moss-700" />;
+  if (status === "FAILED") return <Circle size={19} className="text-red-600" />;
+  if (status === "RUNNING") return <Loader2 size={19} className="animate-spin text-moss-700" />;
+  return <Circle size={19} className="text-slate-400" />;
 }
 
 function statusText(status: string) {
@@ -823,6 +877,7 @@ function statusText(status: string) {
 function stageLabel(stage: string) {
   const labels: Record<string, string> = {
     queued: "任务排队",
+    skill: "Skill 路由",
     parse: "资料解析",
     retrieve: "RAG 检索",
     generate: "生成报告草稿",
@@ -835,9 +890,20 @@ function stageLabel(stage: string) {
 function latestStageLogs(logs: AgentTaskLog[]) {
   const byStage = new Map<string, AgentTaskLog>();
   for (const log of logs) byStage.set(log.stage, log);
-  return ["queued", "parse", "retrieve", "generate", "done", "failed"]
+  return ["queued", "skill", "parse", "retrieve", "generate", "done", "failed"]
     .map((stage) => byStage.get(stage))
     .filter((log): log is AgentTaskLog => Boolean(log));
+}
+
+function skillLabel(skillId?: string) {
+  const labels: Record<string, string> = {
+    AUTO: "智能识别",
+    lab_report: "实验报告",
+    paper_summary: "论文总结",
+    course_qa_report: "课程问答汇报",
+    dynamic_planner: "动态规划"
+  };
+  return skillId ? labels[skillId] || skillId : "待识别";
 }
 
 function normalizeMarkdown(markdown: string) {

@@ -1,0 +1,15 @@
+{
+  "id": "course_qa_report",
+  "label": "课程问答汇报",
+  "description": "适合根据课程资料回答问题、生成讲解稿和汇报材料。",
+  "entry": "SKILL.md",
+  "system_prompt": "You are a rigorous Chinese course-material QA and presentation report assistant.",
+  "query_hint": "Retrieve content about the user's questions, course evidence, definitions, reasoning process, and presentation summary.",
+  "required_sections": [
+    "问题理解",
+    "资料依据",
+    "详细解答",
+    "汇报总结",
+    "待补充信息"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "lab_report",
+  "label": "实验报告",
+  "description": "适合实验、编程实践、算法实现、结果分析类作业。",
+  "entry": "SKILL.md",
+  "system_prompt": "You are a rigorous Chinese university lab report writing assistant.",
+  "query_hint": "Retrieve content about experiment goals, principles, steps, code analysis, and conclusions.",
+  "required_sections": [
+    "实验目的",
+    "实验原理",
+    "实验步骤",
+    "核心代码分析",
+    "实验总结"
+  ]
+}

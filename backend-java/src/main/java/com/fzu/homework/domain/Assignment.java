@@ -14,6 +14,8 @@ public class Assignment {
     private String course;
     private String description;
     private LocalDateTime dueAt;
+    private String skillId;
+    private String resolvedSkillId;
     private String status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
@@ -28,6 +30,10 @@ public class Assignment {
     public void setDescription(String description) { this.description = description; }
     public LocalDateTime getDueAt() { return dueAt; }
     public void setDueAt(LocalDateTime dueAt) { this.dueAt = dueAt; }
+    public String getSkillId() { return skillId; }
+    public void setSkillId(String skillId) { this.skillId = skillId; }
+    public String getResolvedSkillId() { return resolvedSkillId; }
+    public void setResolvedSkillId(String resolvedSkillId) { this.resolvedSkillId = resolvedSkillId; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
     public LocalDateTime getCreatedAt() { return createdAt; }

@@ -1,0 +1,17 @@
+{
+  "id": "paper_summary",
+  "label": "论文总结",
+  "description": "适合论文阅读、文献汇报、创新点总结和课堂展示。",
+  "entry": "SKILL.md",
+  "system_prompt": "You are a rigorous Chinese paper reading and classroom presentation assistant.",
+  "query_hint": "Retrieve content about research background, problem, method, contributions, experiments, conclusion, and limitations.",
+  "required_sections": [
+    "研究背景",
+    "核心问题",
+    "方法概述",
+    "创新点",
+    "实验与结论",
+    "局限与思考",
+    "汇报提纲"
+  ]
+}

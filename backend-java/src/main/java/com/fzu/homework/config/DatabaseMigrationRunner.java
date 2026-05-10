@@ -16,6 +16,8 @@ public class DatabaseMigrationRunner implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) {
         addColumnIfMissing("materials", "error_message", "TEXT");
+        addColumnIfMissing("assignments", "skill_id", "VARCHAR(64) NOT NULL DEFAULT 'AUTO'");
+        addColumnIfMissing("assignments", "resolved_skill_id", "VARCHAR(64)");
         addColumnIfMissing("agent_tasks", "started_at", "DATETIME NULL");
         addColumnIfMissing("agent_tasks", "finished_at", "DATETIME NULL");
     }

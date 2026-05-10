@@ -1,0 +1,16 @@
+{
+  "id": "dynamic_planner",
+  "label": "动态规划",
+  "description": "适合无法稳定匹配固定 skill 的开放作业，由 Agent 动态设计报告结构。",
+  "entry": "SKILL.md",
+  "system_prompt": "You are a rigorous Chinese dynamic assignment planner and report writing assistant.",
+  "query_hint": "Retrieve broad evidence about the assignment goal, required deliverables, domain concepts, constraints, examples, and any requested analysis dimensions.",
+  "required_sections": [
+    "任务理解",
+    "动态报告结构",
+    "资料依据",
+    "主体内容",
+    "结论与建议",
+    "待补充信息"
+  ]
+}

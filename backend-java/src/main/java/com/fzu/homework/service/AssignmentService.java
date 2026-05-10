@@ -21,9 +21,18 @@ import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 public class AssignmentService {
+    private static final String AUTO_SKILL = "AUTO";
+    private static final Set<String> VALID_SKILLS = Set.of(
+            AUTO_SKILL,
+            "lab_report",
+            "paper_summary",
+            "course_qa_report"
+    );
+
     private final AssignmentMapper assignmentMapper;
     private final MaterialMapper materialMapper;
     private final ReportMapper reportMapper;
@@ -56,6 +65,8 @@ public class AssignmentService {
         assignment.setCourse(request.getCourse());
         assignment.setDescription(request.getDescription());
         assignment.setDueAt(request.getDueAt());
+        assignment.setSkillId(normalizeSkillId(request.getSkillId()));
+        assignment.setResolvedSkillId(null);
         assignment.setStatus("DRAFT");
         assignmentMapper.insert(assignment);
         return assignmentMapper.selectById(assignment.getId());
@@ -70,6 +81,11 @@ public class AssignmentService {
         assignment.setCourse(request.getCourse());
         assignment.setDescription(request.getDescription());
         assignment.setDueAt(request.getDueAt());
+        String nextSkillId = normalizeSkillId(request.getSkillId());
+        if (!nextSkillId.equals(assignment.getSkillId())) {
+            assignment.setResolvedSkillId(null);
+        }
+        assignment.setSkillId(nextSkillId);
         assignmentMapper.updateById(assignment);
         return assignmentMapper.selectById(id);
     }
@@ -203,5 +219,13 @@ public class AssignmentService {
                         .eq(AgentTask::getAssignmentId, assignmentId)
                         .orderByDesc(AgentTask::getCreatedAt)
         );
+    }
+
+    private String normalizeSkillId(String skillId) {
+        String value = skillId == null || skillId.isBlank() ? AUTO_SKILL : skillId.trim();
+        if (!VALID_SKILLS.contains(value)) {
+            throw new IllegalArgumentException("Unsupported skillId: " + value);
+        }
+        return value;
     }
 }
