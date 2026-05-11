@@ -14,6 +14,8 @@ import com.fzu.homework.mapper.AgentTaskMapper;
 import com.fzu.homework.mapper.AssignmentMapper;
 import com.fzu.homework.mapper.MaterialMapper;
 import com.fzu.homework.mapper.ReportMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -25,6 +27,7 @@ import java.util.Set;
 
 @Service
 public class AssignmentService {
+    private static final Logger log = LoggerFactory.getLogger(AssignmentService.class);
     private static final String AUTO_SKILL = "AUTO";
     private static final Set<String> VALID_SKILLS = Set.of(
             AUTO_SKILL,
@@ -69,6 +72,7 @@ public class AssignmentService {
         assignment.setResolvedSkillId(null);
         assignment.setStatus("DRAFT");
         assignmentMapper.insert(assignment);
+        log.info("assignment_created assignmentId={} skillId={}", assignment.getId(), assignment.getSkillId());
         return assignmentMapper.selectById(assignment.getId());
     }
 
@@ -87,6 +91,7 @@ public class AssignmentService {
         }
         assignment.setSkillId(nextSkillId);
         assignmentMapper.updateById(assignment);
+        log.info("assignment_updated assignmentId={} skillId={}", id, assignment.getSkillId());
         return assignmentMapper.selectById(id);
     }
 
@@ -105,6 +110,7 @@ public class AssignmentService {
         taskMapper.delete(Wrappers.<AgentTask>lambdaQuery().eq(AgentTask::getAssignmentId, id));
         reportMapper.delete(Wrappers.<Report>lambdaQuery().eq(Report::getAssignmentId, id));
         assignmentMapper.deleteById(id);
+        log.info("assignment_deleted assignmentId={}", id);
     }
 
     public List<Assignment> list(String keyword, String status, String sort) {
@@ -152,6 +158,13 @@ public class AssignmentService {
         material.setIndexStatus("PENDING");
         material.setErrorMessage(null);
         materialMapper.insert(material);
+        log.info(
+                "material_uploaded assignmentId={} materialId={} filename={} sizeBytes={}",
+                assignmentId,
+                material.getId(),
+                material.getFilename(),
+                material.getSizeBytes()
+        );
 
         Assignment assignment = requireAssignment(assignmentId);
         assignment.setStatus("READY");
@@ -166,6 +179,7 @@ public class AssignmentService {
         }
         fileStorageService.delete(material.getStoragePath());
         materialMapper.deleteById(materialId);
+        log.info("material_deleted assignmentId={} materialId={}", material.getAssignmentId(), materialId);
     }
 
     public Map<String, Object> detail(Long assignmentId) {
@@ -187,6 +201,12 @@ public class AssignmentService {
         );
     }
 
+    public List<Material> allMaterials() {
+        return materialMapper.selectList(
+                Wrappers.<Material>lambdaQuery().orderByDesc(Material::getCreatedAt)
+        );
+    }
+
     public Map<String, Object> dashboardSummary() {
         long assignments = assignmentMapper.selectCount(null);
         long materials = materialMapper.selectCount(null);
@@ -194,7 +214,6 @@ public class AssignmentService {
         long overdue = assignmentMapper.selectCount(
                 Wrappers.<Assignment>lambdaQuery()
                         .lt(Assignment::getDueAt, LocalDateTime.now())
-                        .ne(Assignment::getStatus, "DONE")
         );
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("assignments", assignments);

@@ -32,6 +32,8 @@ Each line in the JSONL file is one evaluated case:
 - `skill_routing_accuracy`: whether the resolved skill matches the expected skill.
 - `section_completeness`: whether required Markdown sections appear in the generated report.
 - `groundedness`: ratio of supported grounding claims.
+- `citation_coverage`: precomputed evidence coverage from real AgentTask quality metrics.
+- `rewrite_trigger_rate`: share of tasks that needed automatic rewrite.
 
 ## Run
 
@@ -41,6 +43,16 @@ From `agent-python`:
 python evals/eval_harness.py evals/sample_results.jsonl --k 5
 ```
 
-## Next Steps
+## Export Real Task Data
 
-The current harness is offline and sample-based. Later it can be connected to real generation tasks by saving retrieved chunk ids, expected labels, generated reports, and human annotations.
+After the Java backend has generated reports, you can export task JSON from the API
+or database and convert it into JSONL:
+
+```bash
+python evals/export_task_results.py tasks.json evals/task_results.jsonl
+python evals/eval_harness.py evals/task_results.jsonl --k 5
+```
+
+The exporter reads persisted fields such as `retrievedEvidenceJson`,
+`qualityMetricsJson`, `resolvedSkillId`, and optional human labels like
+`expectedSkillId` / `relevantChunkIds`.

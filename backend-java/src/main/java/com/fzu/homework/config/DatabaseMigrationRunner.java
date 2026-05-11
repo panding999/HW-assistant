@@ -20,6 +20,13 @@ public class DatabaseMigrationRunner implements ApplicationRunner {
         addColumnIfMissing("assignments", "resolved_skill_id", "VARCHAR(64)");
         addColumnIfMissing("agent_tasks", "started_at", "DATETIME NULL");
         addColumnIfMissing("agent_tasks", "finished_at", "DATETIME NULL");
+        addColumnIfMissing("agent_tasks", "resolved_skill_id", "VARCHAR(64)");
+        addColumnIfMissing("agent_tasks", "routing_confidence", "DOUBLE");
+        addColumnIfMissing("agent_tasks", "routing_reason", "TEXT");
+        addColumnIfMissing("agent_tasks", "retrieved_evidence_json", "MEDIUMTEXT");
+        addColumnIfMissing("agent_tasks", "quality_metrics_json", "TEXT");
+        addColumnIfMissing("agent_tasks", "agent_trace_json", "MEDIUMTEXT");
+        addColumnIfMissing("agent_tasks", "draft_version_reason", "TEXT");
     }
 
     private void addColumnIfMissing(String tableName, String columnName, String definition) {

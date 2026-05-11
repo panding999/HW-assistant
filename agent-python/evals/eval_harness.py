@@ -19,6 +19,8 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 def recall_at_k(case: dict[str, Any], k: int) -> float:
     relevant = set(case.get("relevant_chunk_ids") or [])
     retrieved = case.get("retrieved_chunk_ids") or []
+    if "recall_at_k" in case:
+        return float(case["recall_at_k"])
     if not relevant:
         return 0.0
     return 1.0 if relevant.intersection(retrieved[:k]) else 0.0
@@ -50,6 +52,8 @@ def markdown_headings(markdown: str) -> set[str]:
 
 
 def section_completeness(case: dict[str, Any]) -> float:
+    if "section_completeness" in case:
+        return float(case["section_completeness"])
     required = case.get("required_sections") or []
     if not required:
         return 0.0
@@ -59,6 +63,8 @@ def section_completeness(case: dict[str, Any]) -> float:
 
 
 def groundedness(case: dict[str, Any]) -> float:
+    if "citation_coverage" in case:
+        return float(case["citation_coverage"])
     claims = case.get("grounding_claims") or []
     if not claims:
         return 0.0
@@ -75,6 +81,8 @@ def evaluate(cases: list[dict[str, Any]], k: int) -> dict[str, float]:
         "skill_routing_accuracy": mean(routing_accuracy(case) for case in cases),
         "section_completeness": mean(section_completeness(case) for case in cases),
         "groundedness": mean(groundedness(case) for case in cases),
+        "citation_coverage": mean(float(case.get("citation_coverage", groundedness(case))) for case in cases),
+        "rewrite_trigger_rate": mean(1.0 if case.get("rewrite_triggered") else 0.0 for case in cases),
     }
 
 

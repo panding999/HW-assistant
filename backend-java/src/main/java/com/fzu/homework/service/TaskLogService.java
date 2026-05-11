@@ -6,6 +6,8 @@ import com.fzu.homework.dto.TaskLogMessage;
 import com.fzu.homework.mapper.AgentTaskLogMapper;
 import com.fzu.homework.mapper.AgentTaskMapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -17,6 +19,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 @Service
 public class TaskLogService {
+    private static final Logger log = LoggerFactory.getLogger(TaskLogService.class);
     private final AgentTaskMapper taskMapper;
     private final AgentTaskLogMapper logMapper;
     private final ConcurrentHashMap<Long, CopyOnWriteArrayList<SseEmitter>> emitters = new ConcurrentHashMap<>();
@@ -36,6 +39,7 @@ public class TaskLogService {
 
         SseEmitter emitter = new SseEmitter(0L);
         emitters.computeIfAbsent(taskId, ignored -> new CopyOnWriteArrayList<>()).add(emitter);
+        log.info("task_log_subscribe taskId={} subscribers={}", taskId, emitters.get(taskId).size());
 
         emitter.onCompletion(() -> removeEmitter(taskId, emitter));
         emitter.onTimeout(() -> removeEmitter(taskId, emitter));
@@ -65,6 +69,7 @@ public class TaskLogService {
         log.setStatus(status);
         log.setMessage(message);
         logMapper.insert(log);
+        TaskLogService.log.info("task_log_push taskId={} stage={} status={} message={}", taskId, stage, status, message);
 
         AgentTask task = taskMapper.selectById(taskId);
         if (task != null) {
@@ -83,7 +88,7 @@ public class TaskLogService {
         for (SseEmitter emitter : emitters.getOrDefault(taskId, new CopyOnWriteArrayList<>())) {
             try {
                 emitter.send(SseEmitter.event().name("log").data(event));
-                if ("FAILED".equals(status) || ("done".equals(stage) && "SUCCEEDED".equals(status))) {
+                if ("FAILED".equals(status) || ("done".equals(stage) && isTerminalStatus(status))) {
                     emitter.complete();
                 }
             } catch (IOException ex) {
@@ -106,13 +111,19 @@ public class TaskLogService {
         if ("FAILED".equals(status)) {
             return "FAILED";
         }
-        if ("done".equals(stage) && "SUCCEEDED".equals(status)) {
-            return "SUCCEEDED";
+        if ("done".equals(stage) && isTerminalStatus(status)) {
+            return status;
         }
         if ("queued".equals(stage) && "QUEUED".equals(status)) {
             return "QUEUED";
         }
         return "RUNNING";
+    }
+
+    private boolean isTerminalStatus(String status) {
+        return "SUCCEEDED".equals(status)
+                || "NEEDS_REWRITE".equals(status)
+                || "NEEDS_USER_INPUT".equals(status);
     }
 
     private void removeEmitter(Long taskId, SseEmitter emitter) {

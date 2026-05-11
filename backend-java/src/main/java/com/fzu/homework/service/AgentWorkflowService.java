@@ -11,6 +11,8 @@ import com.fzu.homework.mapper.MaterialMapper;
 import com.fzu.homework.mapper.ReportMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Async;
@@ -25,6 +27,7 @@ import java.util.Set;
 
 @Service
 public class AgentWorkflowService {
+    private static final Logger log = LoggerFactory.getLogger(AgentWorkflowService.class);
     private static final String AUTO_SKILL = "AUTO";
     private static final Set<String> VALID_RESOLVED_SKILLS = Set.of(
             "lab_report",
@@ -74,6 +77,7 @@ public class AgentWorkflowService {
         task.setStatus("QUEUED");
         task.setCurrentStage("queued");
         taskMapper.insert(task);
+        log.info("report_task_created taskId={} assignmentId={} materials={}", task.getId(), assignmentId, materialCount);
         return taskMapper.selectById(task.getId());
     }
 
@@ -94,14 +98,17 @@ public class AgentWorkflowService {
     public void runReportTask(Long taskId) {
         AgentTask task = taskMapper.selectById(taskId);
         if (task == null) {
+            log.warn("report_task_missing taskId={}", taskId);
             return;
         }
 
         String currentStage = "queued";
+        long workflowStarted = System.nanoTime();
         try {
             task.setStatus("RUNNING");
             task.setStartedAt(LocalDateTime.now());
             taskMapper.updateById(task);
+            log.info("report_task_start taskId={} assignmentId={}", taskId, task.getAssignmentId());
 
             Assignment assignment = assignmentMapper.selectById(task.getAssignmentId());
             if (assignment == null) {
@@ -117,6 +124,7 @@ public class AgentWorkflowService {
 
             currentStage = "parse";
             taskLogService.push(taskId, currentStage, "RUNNING", "正在解析资料并准备向量化。");
+            long stageStarted = System.nanoTime();
             materials.forEach(material -> {
                 material.setIndexStatus("INDEXING");
                 material.setErrorMessage(null);
@@ -138,9 +146,17 @@ public class AgentWorkflowService {
                     .body(Map.class);
             Object chunkValue = indexResponse == null ? 0 : indexResponse.get("chunks_indexed");
             int chunks = chunkValue instanceof Number ? ((Number) chunkValue).intValue() : 0;
+            log.info(
+                    "report_task_stage_done taskId={} assignmentId={} stage=parse chunks={} durationMs={}",
+                    taskId,
+                    assignment.getId(),
+                    chunks,
+                    elapsedMs(stageStarted)
+            );
 
             materials.forEach(material -> {
                 material.setIndexStatus("INDEXED");
+                material.setErrorMessage(null);
                 materialMapper.updateById(material);
             });
             taskLogService.push(taskId, currentStage, "SUCCEEDED", "资料解析完成，已向量化 " + chunks + " 个资料片段。");
@@ -156,10 +172,9 @@ public class AgentWorkflowService {
             reportPayload.put("skill_id", effectiveSkillId(assignment));
             reportPayload.put("top_k", 8);
 
-            taskLogService.push(taskId, currentStage, "SUCCEEDED", "已检索到相关资料，准备生成报告。");
-
             currentStage = "generate";
             taskLogService.push(taskId, currentStage, "RUNNING", "正在调用 Agent 生成报告草稿。");
+            stageStarted = System.nanoTime();
             Map<?, ?> reportResponse = restClient.post()
                     .uri("/agent/generate-report")
                     .contentType(MediaType.APPLICATION_JSON)
@@ -174,6 +189,24 @@ public class AgentWorkflowService {
             String routingMode = valueOf(reportResponse, "routing_mode", "known_skill");
             double routingConfidence = doubleValue(reportResponse, "routing_confidence", 1.0);
             String routingReason = valueOf(reportResponse, "routing_reason", "No routing reason returned.");
+            Object retrievedEvidence = reportResponse == null ? null : reportResponse.get("retrieved_evidence");
+            Object quality = reportResponse == null ? null : reportResponse.get("quality");
+            Object agentTrace = reportResponse == null ? null : reportResponse.get("agent_trace");
+            String draftVersionReason = valueOf(reportResponse, "draft_version_reason", "初稿已生成。");
+            int retrievedCount = listSize(retrievedEvidence);
+            String qualityNote = qualityNote(quality);
+            boolean rewriteTriggered = rewriteTriggered(quality);
+            String finalStatus = finalStatus(quality);
+            log.info(
+                    "report_task_stage_done taskId={} assignmentId={} stage=generate skill={} retrieved={} rewritten={} finalStatus={} durationMs={}",
+                    taskId,
+                    assignment.getId(),
+                    resolvedSkillId,
+                    retrievedCount,
+                    rewriteTriggered,
+                    finalStatus,
+                    elapsedMs(stageStarted)
+            );
 
             upsertReport(assignment, markdown);
             assignment.setResolvedSkillId(resolvedSkillId);
@@ -182,18 +215,38 @@ public class AgentWorkflowService {
 
             AgentTask completed = taskMapper.selectById(taskId);
             if (completed != null) {
-                completed.setStatus("SUCCEEDED");
+                completed.setStatus(finalStatus);
                 completed.setCurrentStage("done");
                 completed.setFinishedAt(LocalDateTime.now());
                 completed.setErrorMessage(null);
+                completed.setResolvedSkillId(resolvedSkillId);
+                completed.setRoutingConfidence(routingConfidence);
+                completed.setRoutingReason(routingReason);
+                completed.setRetrievedEvidenceJson(toJsonOrNull(retrievedEvidence));
+                completed.setQualityMetricsJson(toJsonOrNull(quality));
+                completed.setAgentTraceJson(toJsonOrNull(agentTrace));
+                completed.setDraftVersionReason(draftVersionReason);
                 taskMapper.updateById(completed);
             }
 
+            taskLogService.push(taskId, "retrieve", "SUCCEEDED", "RAG 检索完成，命中 " + retrievedCount + " 个资料片段。");
             taskLogService.push(taskId, "skill", "SUCCEEDED", routingMessage(resolvedSkillId, routingMode, routingConfidence, routingReason));
+            taskLogService.push(taskId, "quality", finalStatus, qualityNote);
+            if (rewriteTriggered) {
+                taskLogService.push(taskId, "rewrite", finalStatus, draftVersionReason);
+            }
             taskLogService.push(taskId, currentStage, "SUCCEEDED", "已使用 " + skillLabel(resolvedSkillId) + " 生成草稿，可以开始编辑。");
-            taskLogService.push(taskId, "done", "SUCCEEDED", "任务完成。");
+            taskLogService.push(taskId, "done", finalStatus, finalMessage(finalStatus));
+            log.info(
+                    "report_task_done taskId={} assignmentId={} status={} durationMs={}",
+                    taskId,
+                    assignment.getId(),
+                    finalStatus,
+                    elapsedMs(workflowStarted)
+            );
         } catch (Exception ex) {
             String friendlyMessage = friendlyError(ex.getMessage());
+            log.error("report_task_failed taskId={} stage={} message={}", taskId, currentStage, friendlyMessage, ex);
             Assignment assignment = task == null ? null : assignmentMapper.selectById(task.getAssignmentId());
             if ("parse".equals(currentStage) && assignment != null) {
                 materialMapper.selectList(
@@ -224,6 +277,71 @@ public class AgentWorkflowService {
         }
     }
 
+    private String toJsonOrNull(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException ex) {
+            log.warn("agent_response_json_serialize_failed type={}", value.getClass().getName(), ex);
+            return null;
+        }
+    }
+
+    private int listSize(Object value) {
+        return value instanceof List<?> list ? list.size() : 0;
+    }
+
+    private String qualityNote(Object quality) {
+        if (quality instanceof Map<?, ?> qualityMap) {
+            Object note = qualityMap.get("quality_note");
+            if (note != null) {
+                return String.valueOf(note);
+            }
+            double sectionCompleteness = doubleValue(qualityMap, "section_completeness", 0);
+            double citationCoverage = doubleValue(qualityMap, "citation_coverage", 0);
+            int retrievedChunks = (int) doubleValue(qualityMap, "retrieved_chunks", 0);
+            return "质量检查完成：章节完整率 " + String.format("%.0f%%", sectionCompleteness * 100)
+                    + "，引用覆盖率 " + String.format("%.0f%%", citationCoverage * 100)
+                    + "，检索片段 " + retrievedChunks + " 个。";
+        }
+        return "质量检查完成。";
+    }
+
+    private boolean rewriteTriggered(Object quality) {
+        if (quality instanceof Map<?, ?> qualityMap) {
+            Object value = qualityMap.get("rewrite_triggered");
+            return value instanceof Boolean bool && bool;
+        }
+        return false;
+    }
+
+    private String finalStatus(Object quality) {
+        if (quality instanceof Map<?, ?> qualityMap) {
+            Object decision = qualityMap.get("decision");
+            if (decision != null) {
+                String value = String.valueOf(decision);
+                if ("NEEDS_REWRITE".equals(value) || "NEEDS_USER_INPUT".equals(value)) {
+                    return value;
+                }
+            }
+        }
+        return "SUCCEEDED";
+    }
+
+    private String finalMessage(String finalStatus) {
+        return switch (finalStatus) {
+            case "NEEDS_REWRITE" -> "草稿已保存，但模型质量门控仍低于阈值，需要继续人工完善。";
+            case "NEEDS_USER_INPUT" -> "草稿已保存，但模型判断资料或任务信息不足，建议补充资料后再生成。";
+            default -> "任务完成。";
+        };
+    }
+
+    private long elapsedMs(long startedNanos) {
+        return (System.nanoTime() - startedNanos) / 1_000_000;
+    }
+
     private String friendlyError(String message) {
         if (message == null || message.isBlank()) {
             return "任务执行失败，请查看后端日志。";
@@ -239,6 +357,9 @@ public class AgentWorkflowService {
         }
         if (message.contains("500 Internal Server Error")) {
             return "Agent 服务执行失败，请查看 agent-python 日志。";
+        }
+        if (message.contains("502 Bad Gateway") || message.contains("Embedding service connection failed")) {
+            return "Embedding 服务连接失败，可能是 DashScope/OpenAI-compatible 网络临时中断，请稍后重试。";
         }
         return message;
     }
@@ -310,10 +431,12 @@ public class AgentWorkflowService {
             report.setMarkdown(markdown);
             report.setVersion(1);
             reportMapper.insert(report);
+            log.info("report_created assignmentId={} reportId={} version=1", assignment.getId(), report.getId());
         } else {
             report.setMarkdown(markdown);
             report.setVersion(report.getVersion() == null ? 1 : report.getVersion() + 1);
             reportMapper.updateById(report);
+            log.info("report_upserted assignmentId={} reportId={} version={}", assignment.getId(), report.getId(), report.getVersion());
         }
     }
 }

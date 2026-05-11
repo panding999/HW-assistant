@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/reports")
@@ -32,6 +33,11 @@ public class ReportController {
             throw new IllegalArgumentException("Report not found for assignment: " + assignmentId);
         }
         return report;
+    }
+
+    @GetMapping
+    public List<Report> reports() {
+        return reportService.listAll();
     }
 
     @PutMapping("/{reportId}")

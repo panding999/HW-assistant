@@ -97,6 +97,11 @@ public class AssignmentController {
         return Map.of("message", "deleted");
     }
 
+    @GetMapping("/materials")
+    public List<Material> materials() {
+        return assignmentService.allMaterials();
+    }
+
     @PostMapping("/assignments/{id}/generate")
     public AgentTask generate(@PathVariable Long id) {
         assignmentService.requireAssignment(id);

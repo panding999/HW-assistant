@@ -15,6 +15,13 @@ public class AgentTask {
     private String status;
     private String currentStage;
     private String errorMessage;
+    private String resolvedSkillId;
+    private Double routingConfidence;
+    private String routingReason;
+    private String retrievedEvidenceJson;
+    private String qualityMetricsJson;
+    private String agentTraceJson;
+    private String draftVersionReason;
     private LocalDateTime startedAt;
     private LocalDateTime finishedAt;
     private LocalDateTime createdAt;
@@ -32,6 +39,20 @@ public class AgentTask {
     public void setCurrentStage(String currentStage) { this.currentStage = currentStage; }
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+    public String getResolvedSkillId() { return resolvedSkillId; }
+    public void setResolvedSkillId(String resolvedSkillId) { this.resolvedSkillId = resolvedSkillId; }
+    public Double getRoutingConfidence() { return routingConfidence; }
+    public void setRoutingConfidence(Double routingConfidence) { this.routingConfidence = routingConfidence; }
+    public String getRoutingReason() { return routingReason; }
+    public void setRoutingReason(String routingReason) { this.routingReason = routingReason; }
+    public String getRetrievedEvidenceJson() { return retrievedEvidenceJson; }
+    public void setRetrievedEvidenceJson(String retrievedEvidenceJson) { this.retrievedEvidenceJson = retrievedEvidenceJson; }
+    public String getQualityMetricsJson() { return qualityMetricsJson; }
+    public void setQualityMetricsJson(String qualityMetricsJson) { this.qualityMetricsJson = qualityMetricsJson; }
+    public String getAgentTraceJson() { return agentTraceJson; }
+    public void setAgentTraceJson(String agentTraceJson) { this.agentTraceJson = agentTraceJson; }
+    public String getDraftVersionReason() { return draftVersionReason; }
+    public void setDraftVersionReason(String draftVersionReason) { this.draftVersionReason = draftVersionReason; }
     public LocalDateTime getStartedAt() { return startedAt; }
     public void setStartedAt(LocalDateTime startedAt) { this.startedAt = startedAt; }
     public LocalDateTime getFinishedAt() { return finishedAt; }

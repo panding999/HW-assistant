@@ -1,22 +1,31 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 import re
+import time
 from typing import Iterable
 
 import chromadb
 from fastapi import FastAPI, HTTPException
-from openai import OpenAI
+from openai import APIConnectionError, APIError, OpenAI
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
+from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, run_report_agent
 from app.skill_registry import AUTO_SKILL, SKILLS, VALID_SKILLS, SkillSpec
 
 
 ROUTING_THRESHOLD = 0.7
 DYNAMIC_PLANNER_SKILL = "dynamic_planner"
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("homework_agent")
 
 
 class MaterialRef(BaseModel):
@@ -55,6 +64,10 @@ class ReportResponse(BaseModel):
     routing_mode: str
     routing_confidence: float
     routing_reason: str
+    retrieved_evidence: list[RetrievedEvidence] = []
+    quality: QualityMetrics | None = None
+    agent_trace: list[AgentTraceStep] = []
+    draft_version_reason: str = "初稿已生成。"
 
 
 class RoutingResult(BaseModel):
@@ -145,11 +158,69 @@ def embed_texts(texts: Iterable[str]) -> list[list[float]]:
     model = os.getenv("EMBEDDING_MODEL", "text-embedding-v2")
     client = llm_client()
     batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "25"))
+    max_retries = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
     for start in range(0, len(text_list), batch_size):
         batch = text_list[start : start + batch_size]
-        response = client.embeddings.create(model=model, input=batch)
+        response = create_embeddings_with_retry(
+            client=client,
+            model=model,
+            batch=batch,
+            batch_index=start // batch_size,
+            max_retries=max_retries,
+        )
         embeddings.extend(item.embedding for item in response.data)
     return embeddings
+
+
+def create_embeddings_with_retry(
+    client: OpenAI,
+    model: str,
+    batch: list[str],
+    batch_index: int,
+    max_retries: int,
+):
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(
+                "embedding_request_start model=%s batch_index=%s batch_size=%s attempt=%s",
+                model,
+                batch_index,
+                len(batch),
+                attempt,
+            )
+            return client.embeddings.create(model=model, input=batch)
+        except APIConnectionError as exc:
+            logger.warning(
+                "embedding_connection_failed model=%s batch_index=%s attempt=%s/%s error_type=%s",
+                model,
+                batch_index,
+                attempt,
+                max_retries,
+                exc.__class__.__name__,
+            )
+            if attempt >= max_retries:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Embedding service connection failed. Please retry later or check DashScope network access.",
+                ) from exc
+        except APIError as exc:
+            logger.warning(
+                "embedding_api_failed model=%s batch_index=%s attempt=%s/%s status=%s error_type=%s",
+                model,
+                batch_index,
+                attempt,
+                max_retries,
+                getattr(exc, "status_code", None),
+                exc.__class__.__name__,
+            )
+            if attempt >= max_retries:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Embedding service request failed. Please check model configuration and retry.",
+                ) from exc
+        time.sleep(min(2 ** (attempt - 1), 6))
+
+    raise HTTPException(status_code=502, detail="Embedding service request failed.")
 
 
 def normalize_markdown(markdown: str) -> str:
@@ -237,6 +308,7 @@ Course: {course or "not provided"}
 Description: {description or "not provided"}
 """.strip()
     try:
+        logger.info("routing_llm_start title_chars=%s course_present=%s", len(title), bool(course))
         response = llm_client().chat.completions.create(
             model=os.getenv("LLM_MODEL", "qwen-plus"),
             messages=[
@@ -253,12 +325,14 @@ Description: {description or "not provided"}
             confidence = max(0.0, min(float(data.get("confidence", 0)), 1.0))
             reason = str(data.get("reason", "LLM router produced a routing decision."))
             if skill_id not in VALID_SKILLS or skill_id == DYNAMIC_PLANNER_SKILL or confidence < ROUTING_THRESHOLD:
+                logger.info("routing_llm_dynamic skill=%s confidence=%.2f", skill_id, confidence)
                 return RoutingResult(
                     mode="dynamic_plan",
                     resolved_skill_id=DYNAMIC_PLANNER_SKILL,
                     confidence=confidence,
                     reason=reason,
                 )
+            logger.info("routing_llm_known skill=%s confidence=%.2f", skill_id, confidence)
             return RoutingResult(
                 mode="known_skill",
                 resolved_skill_id=skill_id,
@@ -275,7 +349,7 @@ Description: {description or "not provided"}
                 reason="LLM router returned a known skill id without JSON.",
             )
     except Exception:
-        pass
+        logger.exception("routing_llm_failed")
 
     return RoutingResult(
         mode="dynamic_plan",
@@ -288,6 +362,11 @@ Description: {description or "not provided"}
 def resolve_skill(payload: ReportRequest) -> tuple[SkillSpec, RoutingResult]:
     requested = normalize_skill_id(payload.skill_id)
     if requested != AUTO_SKILL:
+        logger.info(
+            "routing_manual assignment_id=%s skill=%s",
+            payload.assignment_id,
+            requested,
+        )
         return SKILLS[requested], RoutingResult(
             mode="known_skill",
             resolved_skill_id=requested,
@@ -297,10 +376,22 @@ def resolve_skill(payload: ReportRequest) -> tuple[SkillSpec, RoutingResult]:
 
     rule_result = route_skill_by_rules(payload.title, payload.course, payload.description)
     if rule_result and rule_result.mode == "known_skill":
+        logger.info(
+            "routing_rule_known assignment_id=%s skill=%s confidence=%.2f",
+            payload.assignment_id,
+            rule_result.resolved_skill_id,
+            rule_result.confidence,
+        )
         return SKILLS[rule_result.resolved_skill_id], rule_result
 
     llm_result = route_skill_with_llm(payload.title, payload.course, payload.description)
     if llm_result.mode == "known_skill" and llm_result.confidence >= ROUTING_THRESHOLD:
+        logger.info(
+            "routing_llm_selected assignment_id=%s skill=%s confidence=%.2f",
+            payload.assignment_id,
+            llm_result.resolved_skill_id,
+            llm_result.confidence,
+        )
         return SKILLS[llm_result.resolved_skill_id], llm_result
 
     dynamic_result = RoutingResult(
@@ -312,6 +403,12 @@ def resolve_skill(payload: ReportRequest) -> tuple[SkillSpec, RoutingResult]:
             if llm_result.confidence > 0
             else (rule_result.reason if rule_result else "No known skill matched confidently.")
         ),
+    )
+    logger.info(
+        "routing_dynamic assignment_id=%s confidence=%.2f reason=%s",
+        payload.assignment_id,
+        dynamic_result.confidence,
+        dynamic_result.reason,
     )
     return SKILLS[DYNAMIC_PLANNER_SKILL], dynamic_result
 
@@ -336,7 +433,7 @@ Assignment title: {payload.title}
 Course: {payload.course or "not provided"}
 Assignment instructions or questions: {payload.description or "not provided"}
 
-Material excerpts:
+Material excerpts with source labels:
 {context_text or "No relevant material was retrieved. Produce an editable draft from the assignment instructions and mark missing evidence as pending."}
 
 Required or suggested sections: {sections}
@@ -349,6 +446,7 @@ Skill instructions:
 Additional output requirements:
 - Output Markdown body only. Do not wrap the whole answer in a code fence.
 - If evidence is missing, mark it clearly instead of inventing details.
+- When using retrieved evidence, add concise source markers such as `[来源: filename]`.
 """.strip()
 
 
@@ -371,6 +469,11 @@ def list_skills() -> list[dict[str, str]]:
 
 @app.post("/agent/index", response_model=IndexResponse)
 def index_materials(payload: IndexRequest) -> IndexResponse:
+    logger.info(
+        "index_start assignment_id=%s materials=%s",
+        payload.assignment_id,
+        len(payload.materials),
+    )
     collection = chroma_client().get_or_create_collection(
         name=collection_name(payload.assignment_id)
     )
@@ -393,6 +496,7 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
             )
 
     if not documents:
+        logger.info("index_done assignment_id=%s chunks=0", payload.assignment_id)
         return IndexResponse(assignment_id=payload.assignment_id, chunks_indexed=0)
 
     embeddings = embed_texts(documents)
@@ -402,6 +506,11 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
         embeddings=embeddings,
         metadatas=metadatas,
     )
+    logger.info(
+        "index_done assignment_id=%s chunks=%s",
+        payload.assignment_id,
+        len(documents),
+    )
     return IndexResponse(
         assignment_id=payload.assignment_id, chunks_indexed=len(documents)
     )
@@ -409,6 +518,12 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
 
 @app.post("/agent/generate-report", response_model=ReportResponse)
 def generate_report(payload: ReportRequest) -> ReportResponse:
+    logger.info(
+        "generate_start assignment_id=%s requested_skill=%s top_k=%s",
+        payload.assignment_id,
+        payload.skill_id,
+        payload.top_k,
+    )
     collection = chroma_client().get_or_create_collection(
         name=collection_name(payload.assignment_id)
     )
@@ -424,29 +539,34 @@ def generate_report(payload: ReportRequest) -> ReportResponse:
         ]
         if part.strip()
     )
-    query_embedding = embed_texts([query])[0]
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=payload.top_k,
+    run: AgentRunResult = run_report_agent(
+        payload=payload,
+        skill=skill,
+        collection=collection,
+        query=query,
+        embed_texts=embed_texts,
+        llm_client=llm_client,
+        build_prompt=build_prompt,
+        normalize_markdown=normalize_markdown,
+        logger=logger,
     )
-    contexts = results.get("documents", [[]])[0] if results else []
-    context_text = "\n\n---\n\n".join(contexts)
-
-    response = llm_client().chat.completions.create(
-        model=os.getenv("LLM_MODEL", "qwen-plus"),
-        messages=[
-            {"role": "system", "content": skill.system_prompt},
-            {"role": "user", "content": build_prompt(payload, skill, context_text)},
-        ],
-        temperature=0.3,
+    logger.info(
+        "generate_done assignment_id=%s skill=%s retrieved=%s rewritten=%s",
+        payload.assignment_id,
+        skill.id,
+        len(run.retrieved_evidence),
+        run.quality.rewrite_triggered,
     )
-    markdown = normalize_markdown(response.choices[0].message.content or "")
     return ReportResponse(
         assignment_id=payload.assignment_id,
-        markdown=markdown.strip(),
-        retrieved_chunks=len(contexts),
+        markdown=run.markdown.strip(),
+        retrieved_chunks=len(run.retrieved_evidence),
         resolved_skill_id=skill.id,
         routing_mode=routing.mode,
         routing_confidence=routing.confidence,
         routing_reason=routing.reason,
+        retrieved_evidence=run.retrieved_evidence,
+        quality=run.quality,
+        agent_trace=run.agent_trace,
+        draft_version_reason=run.draft_version_reason,
     )

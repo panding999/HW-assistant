@@ -5,6 +5,7 @@ import type {
   AssignmentDetail,
   DashboardSummary,
   Material,
+  MonitoringOverview,
   Report
 } from "./types";
 
@@ -32,6 +33,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   summary: () => request<DashboardSummary>("/api/dashboard/summary"),
+  monitoringOverview: () => request<MonitoringOverview>("/api/monitoring/overview"),
   assignments: (params?: { keyword?: string; status?: string; sort?: string }) => {
     const search = new URLSearchParams();
     if (params?.keyword) search.set("keyword", params.keyword);
@@ -83,6 +85,7 @@ export const api = {
     request<{ message: string }>(`/api/materials/${id}`, {
       method: "DELETE"
     }),
+  materials: () => request<Material[]>("/api/materials"),
   generate: (assignmentId: number) =>
     request<AgentTask>(`/api/assignments/${assignmentId}/generate`, {
       method: "POST"
@@ -97,6 +100,7 @@ export const api = {
     }),
   report: (assignmentId: number) =>
     request<Report>(`/api/reports/${assignmentId}`),
+  reports: () => request<Report[]>("/api/reports"),
   updateReport: (reportId: number, markdown: string) =>
     request<Report>(`/api/reports/${reportId}`, {
       method: "PUT",
