@@ -14,7 +14,7 @@ from openai import APIConnectionError, APIError, OpenAI
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, run_report_agent
+from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, SearchQuery, run_report_agent
 from app.skill_registry import AUTO_SKILL, SKILLS, VALID_SKILLS, SkillSpec
 
 
@@ -45,6 +45,11 @@ class IndexRequest(BaseModel):
 class IndexResponse(BaseModel):
     assignment_id: int
     chunks_indexed: int
+
+
+class DeleteCollectionResponse(BaseModel):
+    assignment_id: int
+    deleted: bool
 
 
 class ReportRequest(BaseModel):
@@ -81,15 +86,17 @@ app = FastAPI(title="FZU Homework Agent", version="0.1.0")
 
 
 def get_api_key() -> str:
-    provider = os.getenv("LLM_PROVIDER", "qwen").lower()
+    provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
     if provider == "openai":
         key = os.getenv("OPENAI_API_KEY", "")
+    elif provider == "deepseek":
+        key = os.getenv("DEEPSEEK_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
     else:
         key = os.getenv("DASHSCOPE_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
     if not key:
         raise HTTPException(
             status_code=500,
-            detail="Missing model API key. Set DASHSCOPE_API_KEY or OPENAI_API_KEY.",
+            detail="Missing model API key. Set DEEPSEEK_API_KEY, DASHSCOPE_API_KEY or OPENAI_API_KEY.",
         )
     return key
 
@@ -99,6 +106,17 @@ def llm_client() -> OpenAI:
         api_key=get_api_key(),
         base_url=os.getenv(
             "LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ),
+    )
+
+
+def embedding_client() -> OpenAI:
+    return OpenAI(
+        api_key=os.getenv("EMBEDDING_API_KEY", "")
+        or os.getenv("DASHSCOPE_API_KEY", "")
+        or os.getenv("OPENAI_API_KEY", ""),
+        base_url=os.getenv(
+            "EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
         ),
     )
 
@@ -156,7 +174,7 @@ def embed_texts(texts: Iterable[str]) -> list[list[float]]:
 
     embeddings: list[list[float]] = []
     model = os.getenv("EMBEDDING_MODEL", "text-embedding-v2")
-    client = llm_client()
+    client = embedding_client()
     batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "25"))
     max_retries = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
     for start in range(0, len(text_list), batch_size):
@@ -231,8 +249,21 @@ def normalize_markdown(markdown: str) -> str:
         re.IGNORECASE,
     )
     if fenced:
-        return fenced.group("body").strip()
-    return text
+        text = fenced.group("body").strip()
+    return strip_meta_preface(text)
+
+
+def strip_meta_preface(markdown: str) -> str:
+    lines = markdown.strip().splitlines()
+    if not lines:
+        return ""
+    first = lines[0].strip()
+    meta_words = ("以下是", "下面是", "修补版", "改写版", "报告草稿", "最小必要修补")
+    if any(word in first for word in meta_words):
+        for index, line in enumerate(lines[1:], start=1):
+            if re.match(r"^#{1,6}\s+\S+", line.strip()):
+                return "\n".join(lines[index:]).strip()
+    return markdown.strip()
 
 
 def normalize_skill_id(skill_id: str | None) -> str:
@@ -275,44 +306,44 @@ def route_skill_by_rules(title: str, course: str | None, description: str | None
             mode="known_skill",
             resolved_skill_id=best_skill,
             confidence=confidence,
-            reason=f"Rule router matched {best_score} keyword(s) for {best_skill}.",
+            reason=f"规则路由命中 {best_score} 个{skill_label(best_skill)}关键词。",
         )
     return RoutingResult(
         mode="dynamic_plan",
         resolved_skill_id=DYNAMIC_PLANNER_SKILL,
         confidence=confidence,
-        reason=f"Rule router weakly matched {best_skill}; confidence below threshold.",
+        reason=f"规则路由仅弱命中{skill_label(best_skill)}，置信度低于阈值，转入动态任务规划。",
     )
 
 
 def route_skill_with_llm(title: str, course: str | None, description: str | None) -> RoutingResult:
     prompt = f"""
-Choose the best generation strategy for this assignment.
-Return a strict JSON object with keys: mode, resolved_skill_id, confidence, reason.
+请为当前作业选择最合适的生成策略。
+只返回严格 JSON 对象，字段为：mode, resolved_skill_id, confidence, reason。
 
-Allowed known skill ids:
-- lab_report: lab report, programming experiment, algorithm implementation, result analysis
-- paper_summary: paper reading, literature summary, contribution analysis, paper presentation
-- course_qa_report: answer course-material questions, explain course content, presentation report
+可选固定 Skill：
+- lab_report：实验报告、编程实践、算法实现、结果分析
+- paper_summary：论文阅读、文献总结、创新点分析、论文汇报
+- course_qa_report：课程资料问答、知识讲解、汇报总结
 
-If none of the known skills fits confidently, return:
-{{"mode":"dynamic_plan","resolved_skill_id":"dynamic_planner","confidence":0.4,"reason":"..."}}
+如果固定 Skill 都不够匹配，请返回：
+{{"mode":"dynamic_plan","resolved_skill_id":"dynamic_planner","confidence":0.4,"reason":"中文原因"}}
 
-Rules:
-- Use mode "known_skill" only when confidence is at least 0.7.
-- Use mode "dynamic_plan" when the task is open-ended, mixed, unclear, or not covered by known skills.
-- confidence must be a number from 0 to 1.
+- 只有 confidence >= 0.7 时才使用 mode="known_skill"。
+- 开放型、混合型、描述不清或不属于固定 Skill 的任务，使用 mode="dynamic_plan"。
+- confidence 必须是 0 到 1 的数字。
+- reason 必须使用中文，说明为什么选择该策略，不要输出英文。
 
-Title: {title}
-Course: {course or "not provided"}
-Description: {description or "not provided"}
+作业标题：{title}
+课程：{course or "未提供"}
+作业描述：{description or "未提供"}
 """.strip()
     try:
         logger.info("routing_llm_start title_chars=%s course_present=%s", len(title), bool(course))
         response = llm_client().chat.completions.create(
-            model=os.getenv("LLM_MODEL", "qwen-plus"),
+            model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
             messages=[
-                {"role": "system", "content": "You are a strict assignment skill router."},
+                {"role": "system", "content": "你是严格的中文作业类型识别器，只输出可解析 JSON。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
@@ -323,7 +354,7 @@ Description: {description or "not provided"}
             data = json.loads(json_match.group(0))
             skill_id = str(data.get("resolved_skill_id", DYNAMIC_PLANNER_SKILL))
             confidence = max(0.0, min(float(data.get("confidence", 0)), 1.0))
-            reason = str(data.get("reason", "LLM router produced a routing decision."))
+            reason = chinese_reason(str(data.get("reason", "")), f"模型判断该任务更适合{skill_label(skill_id)}。")
             if skill_id not in VALID_SKILLS or skill_id == DYNAMIC_PLANNER_SKILL or confidence < ROUTING_THRESHOLD:
                 logger.info("routing_llm_dynamic skill=%s confidence=%.2f", skill_id, confidence)
                 return RoutingResult(
@@ -346,7 +377,7 @@ Description: {description or "not provided"}
                 mode="known_skill",
                 resolved_skill_id=match.group(1),
                 confidence=ROUTING_THRESHOLD,
-                reason="LLM router returned a known skill id without JSON.",
+                reason=f"模型返回了已知 Skill：{skill_label(match.group(1))}。",
             )
     except Exception:
         logger.exception("routing_llm_failed")
@@ -355,7 +386,7 @@ Description: {description or "not provided"}
         mode="dynamic_plan",
         resolved_skill_id=DYNAMIC_PLANNER_SKILL,
         confidence=0.0,
-        reason="LLM router failed; falling back to dynamic planning.",
+        reason="模型路由失败，已回退到动态任务规划。",
     )
 
 
@@ -371,7 +402,7 @@ def resolve_skill(payload: ReportRequest) -> tuple[SkillSpec, RoutingResult]:
             mode="known_skill",
             resolved_skill_id=requested,
             confidence=1.0,
-            reason="User manually selected this skill.",
+            reason=f"用户手动选择了{skill_label(requested)}。",
         )
 
     rule_result = route_skill_by_rules(payload.title, payload.course, payload.description)
@@ -401,7 +432,7 @@ def resolve_skill(payload: ReportRequest) -> tuple[SkillSpec, RoutingResult]:
         reason=(
             llm_result.reason
             if llm_result.confidence > 0
-            else (rule_result.reason if rule_result else "No known skill matched confidently.")
+            else (rule_result.reason if rule_result else "没有高置信命中固定 Skill，进入动态任务规划。")
         ),
     )
     logger.info(
@@ -418,36 +449,94 @@ def build_prompt(payload: ReportRequest, skill: SkillSpec, context_text: str) ->
     dynamic_note = ""
     if skill.id == DYNAMIC_PLANNER_SKILL:
         dynamic_note = """
-Dynamic planning workflow:
-1. Analyze the assignment goal.
-2. Propose an appropriate report structure.
-3. Use the retrieved evidence to fill the structure.
-4. Mark missing evidence explicitly.
+动态任务规划流程：
+1. 分析作业目标、交付物和评价维度。
+2. 根据任务特点设计合适的报告结构。
+3. 使用检索证据填充主体内容。
+4. 输出连贯完整的最终草稿，避免未完成占位符。
 """.strip()
 
     return f"""
-Write a Chinese Markdown draft for the current assignment using the selected skill: {skill.label}.
-Strictly ground the answer in the provided material excerpts.
+请使用所选生成策略“{skill.label}”为当前作业撰写中文 Markdown 报告。
+这份内容会作为用户拿到的报告版本，请在证据允许范围内尽量接近可提交状态。
+必须基于给定资料摘录和作业要求组织内容。
 
-Assignment title: {payload.title}
-Course: {payload.course or "not provided"}
-Assignment instructions or questions: {payload.description or "not provided"}
+作业标题：{payload.title}
+课程：{payload.course or "未提供"}
+作业说明或问题：{payload.description or "未提供"}
 
-Material excerpts with source labels:
-{context_text or "No relevant material was retrieved. Produce an editable draft from the assignment instructions and mark missing evidence as pending."}
+带来源标签的资料摘录：
+{context_text or "未检索到相关资料。请基于作业说明生成连贯草稿，不要添加占位符。"}
 
-Required or suggested sections: {sections}
+必要或建议章节：{sections}
 
-Skill instructions:
-{skill.instructions or "Follow the skill metadata and required sections."}
+Skill 说明：
+{skill.instructions or "请遵循 Skill 元数据和必要章节。"}
 
 {dynamic_note}
 
-Additional output requirements:
-- Output Markdown body only. Do not wrap the whole answer in a code fence.
-- If evidence is missing, mark it clearly instead of inventing details.
-- When using retrieved evidence, add concise source markers such as `[来源: filename]`.
+额外输出要求：
+- 只输出 Markdown 正文，不要用代码块包裹全文。
+- 不要输出“以下是”“改写版”“最小必要修补”等元说明，也不要解释你如何修改草稿。
+- 不要输出“待补充”“资料不足”“TODO”“TBD”等未完成占位符。
+- 如果证据有限，请使用保守表述，用正常正文说明必要假设或限制，并保持报告连贯。
+- 使用检索证据时添加简洁来源标注，例如 `[来源: filename]`。
 """.strip()
+
+
+def build_search_queries(payload: ReportRequest, skill: SkillSpec) -> list[SearchQuery]:
+    assignment_parts = [
+        f"作业标题：{payload.title}",
+        f"课程：{payload.course or ''}",
+        f"作业描述：{payload.description or ''}",
+    ]
+    skill_parts = [
+        f"生成类型：{skill.label}",
+        f"必要章节：{'、'.join(skill.required_sections)}",
+        f"检索提示：{skill.query_hint}",
+    ]
+    section_parts = [
+        f"围绕这些章节检索资料：{'、'.join(skill.required_sections)}",
+        f"作业要求：{payload.description or payload.title}",
+    ]
+    return [
+        SearchQuery(name="assignment_query", text="\n".join(part for part in assignment_parts if part.strip())),
+        SearchQuery(name="skill_query", text="\n".join(part for part in skill_parts if part.strip())),
+        SearchQuery(name="section_query", text="\n".join(part for part in section_parts if part.strip())),
+    ]
+
+
+def skill_label(skill_id: str) -> str:
+    return {
+        "lab_report": "实验报告",
+        "paper_summary": "论文总结",
+        "course_qa_report": "课程问答汇报",
+        "dynamic_planner": "动态任务规划",
+        AUTO_SKILL: "智能识别",
+    }.get(skill_id, skill_id)
+
+
+def chinese_reason(reason: str, fallback: str) -> str:
+    text = (reason or "").strip()
+    if not text:
+        return fallback
+    ascii_letters = sum(1 for char in text if ("a" <= char.lower() <= "z"))
+    chinese_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    if ascii_letters > chinese_chars * 2:
+        return fallback
+    return text
+
+
+def reset_assignment_collection(assignment_id: int):
+    client = chroma_client()
+    name = collection_name(assignment_id)
+    try:
+        client.delete_collection(name=name)
+        logger.info("collection_deleted assignment_id=%s name=%s", assignment_id, name)
+    except Exception as exc:
+        if "does not exist" not in str(exc).lower() and "not found" not in str(exc).lower():
+            logger.warning("collection_delete_skipped assignment_id=%s error=%s", assignment_id, exc.__class__.__name__)
+    return client.get_or_create_collection(name=name)
 
 
 @app.get("/health")
@@ -474,9 +563,7 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
         payload.assignment_id,
         len(payload.materials),
     )
-    collection = chroma_client().get_or_create_collection(
-        name=collection_name(payload.assignment_id)
-    )
+    collection = reset_assignment_collection(payload.assignment_id)
 
     ids: list[str] = []
     documents: list[str] = []
@@ -516,6 +603,20 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
     )
 
 
+@app.delete("/agent/collections/{assignment_id}", response_model=DeleteCollectionResponse)
+def delete_assignment_collection(assignment_id: int) -> DeleteCollectionResponse:
+    client = chroma_client()
+    name = collection_name(assignment_id)
+    try:
+        client.delete_collection(name=name)
+        logger.info("collection_deleted assignment_id=%s name=%s", assignment_id, name)
+        return DeleteCollectionResponse(assignment_id=assignment_id, deleted=True)
+    except Exception as exc:
+        if "does not exist" in str(exc).lower() or "not found" in str(exc).lower():
+            return DeleteCollectionResponse(assignment_id=assignment_id, deleted=False)
+        raise HTTPException(status_code=502, detail="删除向量集合失败，请检查 ChromaDB 服务。") from exc
+
+
 @app.post("/agent/generate-report", response_model=ReportResponse)
 def generate_report(payload: ReportRequest) -> ReportResponse:
     logger.info(
@@ -529,21 +630,12 @@ def generate_report(payload: ReportRequest) -> ReportResponse:
     )
     skill, routing = resolve_skill(payload)
 
-    query = "\n".join(
-        part
-        for part in [
-            f"Assignment title: {payload.title}",
-            f"Course: {payload.course or ''}",
-            f"Description: {payload.description or ''}",
-            skill.query_hint,
-        ]
-        if part.strip()
-    )
+    queries = build_search_queries(payload, skill)
     run: AgentRunResult = run_report_agent(
         payload=payload,
         skill=skill,
         collection=collection,
-        query=query,
+        query=queries,
         embed_texts=embed_texts,
         llm_client=llm_client,
         build_prompt=build_prompt,

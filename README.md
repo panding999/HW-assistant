@@ -24,7 +24,7 @@ Spring Boot Backend
 FastAPI Python Agent
   |  Skill Routing / RAG / ReAct-lite Loop / 质量审稿 / 自动改写
   v
-ChromaDB + DashScope OpenAI-compatible API
+ChromaDB + DeepSeek OpenAI-compatible API + DashScope Embedding
 ```
 
 数据存储：
@@ -40,7 +40,7 @@ ChromaDB + DashScope OpenAI-compatible API
 | Frontend | Next.js 14, React 18, TypeScript, Tailwind CSS, lucide-react |
 | Backend | Spring Boot 3, Java 21, MyBatis Plus, MySQL, Redis, SSE, SLF4J |
 | Agent | FastAPI, Pydantic, OpenAI-compatible SDK, ChromaDB, pypdf |
-| LLM Provider | DashScope / Qwen OpenAI-compatible API |
+| LLM Provider | DeepSeek OpenAI-compatible API, DashScope Embedding |
 | DevOps | Docker Compose |
 
 ## 核心流程
@@ -111,15 +111,17 @@ search_materials -> build_report_draft -> check_report_quality -> rewrite_report
 cp .env.example .env
 ```
 
-编辑 `.env`，填入 DashScope API Key：
+编辑 `.env`，填入 DeepSeek API Key 和 DashScope Embedding API Key：
 
 ```env
-DASHSCOPE_API_KEY=your_dashscope_api_key
-LLM_PROVIDER=qwen
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_MODEL=qwen-plus
+LLM_PROVIDER=deepseek
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-v4-flash
+DEEPSEEK_API_KEY=your_deepseek_api_key
+EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=text-embedding-v2
-QUALITY_PASS_SCORE=0.78
+DASHSCOPE_API_KEY=your_dashscope_api_key
+QUALITY_PASS_SCORE=0.70
 ```
 
 > 真实密钥只放本地 `.env`，不要提交到 GitHub。
@@ -256,7 +258,7 @@ python evals/eval_harness.py evals/task_results.jsonl --k 5
 
 ## 适合写进简历的描述
 
-> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DashScope OpenAI-compatible API 和 ChromaDB，实现资料解析、RAG 检索、Skill Routing、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持成功率、P95 耗时、改写率、阶段耗时和检索指标统计。
+> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding 和 ChromaDB，实现资料解析、RAG 检索、任务类型识别、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计。
 
 ## 安全说明
 

@@ -146,6 +146,9 @@ public class AgentWorkflowService {
                     .body(Map.class);
             Object chunkValue = indexResponse == null ? 0 : indexResponse.get("chunks_indexed");
             int chunks = chunkValue instanceof Number ? ((Number) chunkValue).intValue() : 0;
+            if (chunks == 0) {
+                throw new IllegalStateException("资料无法提取有效文本，请上传可复制文本的 PDF、Markdown 或 TXT 后重试。");
+            }
             log.info(
                     "report_task_stage_done taskId={} assignmentId={} stage=parse chunks={} durationMs={}",
                     taskId,
@@ -188,7 +191,7 @@ public class AgentWorkflowService {
             String resolvedSkillId = normalizeResolvedSkillId(valueOf(reportResponse, "resolved_skill_id", "lab_report"));
             String routingMode = valueOf(reportResponse, "routing_mode", "known_skill");
             double routingConfidence = doubleValue(reportResponse, "routing_confidence", 1.0);
-            String routingReason = valueOf(reportResponse, "routing_reason", "No routing reason returned.");
+            String routingReason = chineseReason(valueOf(reportResponse, "routing_reason", "未返回路由原因。"), "Agent 已完成任务类型识别。");
             Object retrievedEvidence = reportResponse == null ? null : reportResponse.get("retrieved_evidence");
             Object quality = reportResponse == null ? null : reportResponse.get("quality");
             Object agentTrace = reportResponse == null ? null : reportResponse.get("agent_trace");
@@ -332,7 +335,7 @@ public class AgentWorkflowService {
 
     private String finalMessage(String finalStatus) {
         return switch (finalStatus) {
-            case "NEEDS_REWRITE" -> "草稿已保存，但模型质量门控仍低于阈值，需要继续人工完善。";
+            case "NEEDS_REWRITE" -> "草稿已保存，但模型质量门控建议继续完善。";
             case "NEEDS_USER_INPUT" -> "草稿已保存，但模型判断资料或任务信息不足，建议补充资料后再生成。";
             default -> "任务完成。";
         };
@@ -355,6 +358,9 @@ public class AgentWorkflowService {
         if (message.contains("batch size is invalid")) {
             return "向量化批次过大，请降低 EMBEDDING_BATCH_SIZE 后重试。";
         }
+        if (message.contains("资料无法提取有效文本")) {
+            return "资料无法提取有效文本，请上传可复制文本的 PDF、Markdown 或 TXT 后重试。";
+        }
         if (message.contains("500 Internal Server Error")) {
             return "Agent 服务执行失败，请查看 agent-python 日志。";
         }
@@ -362,6 +368,18 @@ public class AgentWorkflowService {
             return "Embedding 服务连接失败，可能是 DashScope/OpenAI-compatible 网络临时中断，请稍后重试。";
         }
         return message;
+    }
+
+    public void deleteAssignmentCollection(Long assignmentId) {
+        try {
+            restClient.delete()
+                    .uri("/agent/collections/{assignmentId}", assignmentId)
+                    .retrieve()
+                    .toBodilessEntity();
+            log.info("agent_collection_delete_requested assignmentId={}", assignmentId);
+        } catch (Exception ex) {
+            log.warn("agent_collection_delete_failed assignmentId={} errorType={}", assignmentId, ex.getClass().getSimpleName());
+        }
     }
 
     private Map<String, Object> materialPayload(Material material) {
@@ -404,10 +422,11 @@ public class AgentWorkflowService {
 
     private String routingMessage(String skillId, String mode, double confidence, String reason) {
         String percent = String.format("%.0f%%", confidence * 100);
+        String safeReason = chineseReason(reason, "Agent 已完成任务类型识别。");
         if ("dynamic_plan".equals(mode)) {
-            return "Skill 路由：未高置信命中固定 Skill，进入动态规划。置信度 " + percent + "。原因：" + reason;
+            return "任务类型识别：未高置信命中固定 Skill，进入动态任务规划。置信度 " + percent + "。原因：" + safeReason;
         }
-        return "Skill 路由：命中 " + skillLabel(skillId) + "，置信度 " + percent + "。原因：" + reason;
+        return "任务类型识别：命中 " + skillLabel(skillId) + "，置信度 " + percent + "。原因：" + safeReason;
     }
 
     private String skillLabel(String skillId) {
@@ -415,9 +434,22 @@ public class AgentWorkflowService {
             case "paper_summary" -> "论文总结";
             case "course_qa_report" -> "课程问答汇报";
             case "lab_report" -> "实验报告";
-            case "dynamic_planner" -> "动态规划";
+            case "dynamic_planner" -> "动态任务规划";
             default -> "智能识别";
         };
+    }
+
+    private String chineseReason(String reason, String fallback) {
+        if (reason == null || reason.isBlank()) {
+            return fallback;
+        }
+        long asciiLetters = reason.chars()
+                .filter(ch -> (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))
+                .count();
+        long chineseChars = reason.chars()
+                .filter(ch -> ch >= 0x4e00 && ch <= 0x9fff)
+                .count();
+        return asciiLetters > chineseChars * 2 ? fallback : reason;
     }
 
     private void upsertReport(Assignment assignment, String markdown) {

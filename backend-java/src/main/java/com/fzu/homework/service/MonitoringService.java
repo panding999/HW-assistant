@@ -86,12 +86,16 @@ public class MonitoringService {
     private Map<String, Object> buildKpis(List<AgentTask> tasks) {
         int totalTasks = tasks.size();
         long succeeded = tasks.stream().filter(task -> "SUCCEEDED".equals(task.getStatus())).count();
+        long completed = tasks.stream().filter(this::hasReportOutput).count();
         List<Long> durations = taskDurationsSeconds(tasks);
         long dynamicPlanner = tasks.stream()
                 .filter(task -> "dynamic_planner".equals(task.getResolvedSkillId()))
                 .count();
         long rewriteTriggered = tasks.stream()
                 .filter(task -> qualityFlag(task, "rewrite_triggered"))
+                .count();
+        long rewriteAccepted = tasks.stream()
+                .filter(this::rewriteAccepted)
                 .count();
         double avgRetrievedChunks = tasks.stream()
                 .mapToDouble(this::retrievedChunks)
@@ -100,10 +104,14 @@ public class MonitoringService {
 
         Map<String, Object> kpis = new LinkedHashMap<>();
         kpis.put("totalTasks", totalTasks);
+        kpis.put("taskCompletionRate", ratio(completed, totalTasks));
+        kpis.put("qualityPassRate", ratio(succeeded, totalTasks));
         kpis.put("successRate", ratio(succeeded, totalTasks));
         kpis.put("avgDurationSeconds", roundOne(durations.stream().mapToLong(Long::longValue).average().orElse(0)));
         kpis.put("p95DurationSeconds", p95(durations));
         kpis.put("dynamicPlannerRate", ratio(dynamicPlanner, totalTasks));
+        kpis.put("rewriteTriggerRate", ratio(rewriteTriggered, totalTasks));
+        kpis.put("rewriteAcceptRate", ratio(rewriteAccepted, rewriteTriggered));
         kpis.put("rewriteRate", ratio(rewriteTriggered, totalTasks));
         kpis.put("avgRetrievedChunks", roundOne(avgRetrievedChunks));
         return kpis;
@@ -212,6 +220,23 @@ public class MonitoringService {
         return Boolean.TRUE.equals(value) || "true".equalsIgnoreCase(String.valueOf(value));
     }
 
+    private boolean hasReportOutput(AgentTask task) {
+        return "SUCCEEDED".equals(task.getStatus())
+                || "NEEDS_REWRITE".equals(task.getStatus())
+                || "NEEDS_USER_INPUT".equals(task.getStatus());
+    }
+
+    private boolean rewriteAccepted(AgentTask task) {
+        for (Map<String, Object> traceStep : parseList(task.getAgentTraceJson())) {
+            String stage = normalizeKey(stringValue(traceStep.get("stage")), "");
+            String output = stringValue(traceStep.get("output_summary"));
+            if ("rewrite".equals(stage) && output != null && output.contains("accepted_rewrite=true")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private long retrievedChunks(AgentTask task) {
         Object value = parseObject(task.getQualityMetricsJson()).get("retrieved_chunks");
         Long count = longValue(value);
@@ -284,7 +309,7 @@ public class MonitoringService {
             case "lab_report" -> "实验报告";
             case "paper_summary" -> "论文总结";
             case "course_qa_report" -> "课程问答";
-            case "dynamic_planner" -> "动态规划";
+            case "dynamic_planner" -> "动态任务规划";
             case "pending" -> "待识别";
             default -> skillId;
         };
@@ -292,7 +317,7 @@ public class MonitoringService {
 
     private String stageLabel(String stage) {
         return switch (stage) {
-            case "skill" -> "Skill 路由";
+            case "skill" -> "任务类型识别";
             case "parse" -> "资料解析";
             case "retrieve", "search_materials" -> "RAG 检索";
             case "generate", "build_report_draft" -> "生成草稿";

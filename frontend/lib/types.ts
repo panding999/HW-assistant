@@ -64,6 +64,7 @@ export type AgentQualityMetrics = {
   total_score?: number;
   pass_score?: number;
   decision?: "PASS" | "NEEDS_REWRITE" | "NEEDS_USER_INPUT" | string;
+  manual_review_reason?: string;
   review_summary?: string;
   issues?: string[];
   rewrite_focus?: string[];
@@ -104,10 +105,14 @@ export type MonitoringOverview = {
   kpis: {
     totalTasks: number;
     successRate: number;
+    taskCompletionRate?: number;
+    qualityPassRate?: number;
     avgDurationSeconds: number;
     p95DurationSeconds: number;
     dynamicPlannerRate: number;
     rewriteRate: number;
+    rewriteTriggerRate?: number;
+    rewriteAcceptRate?: number;
     avgRetrievedChunks?: number;
   };
   skillDistribution: Array<{

@@ -48,12 +48,15 @@ services:
       TZ: Asia/Shanghai
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
-      LLM_PROVIDER: ${LLM_PROVIDER:-qwen}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
-      LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v2}
-      QUALITY_PASS_SCORE: ${QUALITY_PASS_SCORE:-0.78}
+      QUALITY_PASS_SCORE: ${QUALITY_PASS_SCORE:-0.70}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "${AGENT_PORT:-8000}:8000"

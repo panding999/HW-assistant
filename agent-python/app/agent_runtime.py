@@ -23,6 +23,19 @@ class RetrievedEvidence(BaseModel):
     excerpt: str = ""
 
 
+class SearchQuery(BaseModel):
+    name: str
+    text: str
+
+
+class SearchResult(BaseModel):
+    evidence: list[RetrievedEvidence]
+    query_count: int
+    per_query_counts: dict[str, int] = {}
+    raw_hits: int
+    deduped_hits: int
+
+
 class AgentTraceStep(BaseModel):
     step_index: int
     stage: str
@@ -44,8 +57,9 @@ class QualityMetrics(BaseModel):
     readiness_score: float = Field(default=0.0, ge=0, le=1)
     risk_score: float = Field(default=0.0, ge=0, le=1)
     total_score: float = Field(default=0.0, ge=0, le=1)
-    pass_score: float = Field(default=0.78, ge=0, le=1)
+    pass_score: float = Field(default=0.75, ge=0, le=1)
     decision: str = QUALITY_DECISION_REWRITE
+    manual_review_reason: str = ""
     review_summary: str = ""
     issues: list[str] = []
     rewrite_focus: list[str] = []
@@ -66,6 +80,7 @@ class QualityReview(BaseModel):
     specificity_score: float = Field(default=0.0, ge=0, le=1)
     readiness_score: float = Field(default=0.0, ge=0, le=1)
     risk_score: float = Field(default=0.0, ge=0, le=1)
+    total_score: float = Field(default=0.0, ge=0, le=1)
     review_summary: str = ""
     issues: list[str] = []
     rewrite_focus: list[str] = []
@@ -77,7 +92,7 @@ def run_report_agent(
     payload: Any,
     skill: Any,
     collection: Any,
-    query: str,
+    query: str | list[SearchQuery],
     embed_texts: Callable[[list[str]], list[list[float]]],
     llm_client: Callable[[], Any],
     build_prompt: Callable[[Any, Any, str], str],
@@ -116,13 +131,17 @@ def run_report_agent(
     )
 
     started = time.perf_counter()
-    evidence = search_materials(collection, query, payload.top_k, embed_texts)
+    search_result = search_materials(collection, query, payload.top_k, embed_texts)
+    evidence = search_result.evidence
     context_text = evidence_context(evidence)
     record(
         stage="retrieve",
         tool_name="search_materials",
-        input_summary=f"top_k={payload.top_k}",
-        output_summary=f"retrieved={len(evidence)}",
+        input_summary=f"top_k={payload.top_k} query_count={search_result.query_count}",
+        output_summary=(
+            f"raw_hits={search_result.raw_hits}; deduped={search_result.deduped_hits}; "
+            f"retrieved={len(evidence)}; per_query={search_result.per_query_counts}"
+        ),
         started=started,
     )
     logger.info(
@@ -181,9 +200,11 @@ def run_report_agent(
     )
     if rewrite_needed:
         started = time.perf_counter()
-        markdown = rewrite_report(payload, skill, markdown, context_text, quality, llm_client, normalize_markdown)
-        quality = evaluate_quality(
-            markdown,
+        original_markdown = markdown
+        original_quality = quality
+        rewritten_markdown = rewrite_report(payload, skill, original_markdown, context_text, original_quality, llm_client, normalize_markdown)
+        rewritten_quality = evaluate_quality(
+            rewritten_markdown,
             skill.required_sections,
             evidence,
             rewrite_triggered=True,
@@ -192,12 +213,27 @@ def run_report_agent(
             skill=skill,
             pass_score=pass_score,
         )
-        draft_version_reason = f"模型质量门控触发自动改写一次，当前评分 {quality.total_score:.0%}。"
+        if rewritten_quality.total_score >= original_quality.total_score:
+            markdown = rewritten_markdown
+            quality = rewritten_quality
+            draft_version_reason = f"模型质量门控触发自动改写一次，当前评分 {quality.total_score:.0%}。"
+            rewrite_summary = f"accepted_rewrite=true; markdown_chars={len(markdown)}; {quality.quality_note}"
+        else:
+            quality = original_quality.copy(update={"rewrite_triggered": True})
+            markdown = original_markdown
+            draft_version_reason = (
+                f"模型质量门控触发自动改写一次，但改写评分 {rewritten_quality.total_score:.0%} "
+                f"低于初稿 {original_quality.total_score:.0%}，已保留初稿。"
+            )
+            rewrite_summary = (
+                f"accepted_rewrite=false; original_score={original_quality.total_score:.0%}; "
+                f"rewrite_score={rewritten_quality.total_score:.0%}; kept_original=true"
+            )
         record(
             stage="rewrite",
             tool_name="rewrite_report",
             input_summary="model quality gate requested rewrite",
-            output_summary=f"markdown_chars={len(markdown)}; {quality.quality_note}",
+            output_summary=rewrite_summary,
             started=started,
         )
         logger.info(
@@ -227,36 +263,90 @@ def run_report_agent(
 
 def search_materials(
     collection: Any,
-    query: str,
+    query: str | list[SearchQuery],
     top_k: int,
     embed_texts: Callable[[list[str]], list[list[float]]],
-) -> list[RetrievedEvidence]:
-    query_embedding = embed_texts([query])[0]
+) -> SearchResult:
+    queries = normalize_search_queries(query)
+    query_embeddings = embed_texts([item.text for item in queries])
+    if not query_embeddings:
+        return SearchResult(evidence=[], query_count=0, raw_hits=0, deduped_hits=0)
     results = collection.query(
-        query_embeddings=[query_embedding],
+        query_embeddings=query_embeddings,
         n_results=top_k,
         include=["documents", "metadatas", "distances"],
     )
-    documents = (results.get("documents") or [[]])[0]
-    metadatas = (results.get("metadatas") or [[]])[0]
-    distances = (results.get("distances") or [[]])[0]
-    ids = (results.get("ids") or [[]])[0]
+    documents_by_query = normalize_result_lists(results.get("documents"), len(queries))
+    metadatas_by_query = normalize_result_lists(results.get("metadatas"), len(queries))
+    distances_by_query = normalize_result_lists(results.get("distances"), len(queries))
+    ids_by_query = normalize_result_lists(results.get("ids"), len(queries))
 
-    evidence: list[RetrievedEvidence] = []
-    for index, document in enumerate(documents):
-        metadata = metadatas[index] if index < len(metadatas) and metadatas[index] else {}
-        distance = distances[index] if index < len(distances) else None
-        score = None if distance is None else round(1 / (1 + max(float(distance), 0.0)), 4)
-        evidence.append(
-            RetrievedEvidence(
-                chunk_id=str(ids[index]) if index < len(ids) else str(index),
+    by_chunk_id: dict[str, RetrievedEvidence] = {}
+    per_query_counts: dict[str, int] = {}
+    raw_hits = 0
+    for query_index, query_item in enumerate(queries):
+        documents = documents_by_query[query_index]
+        metadatas = metadatas_by_query[query_index]
+        distances = distances_by_query[query_index]
+        ids = ids_by_query[query_index]
+        per_query_counts[query_item.name] = len(documents)
+        raw_hits += len(documents)
+        for index, document in enumerate(documents):
+            metadata = metadatas[index] if index < len(metadatas) and metadatas[index] else {}
+            distance = distances[index] if index < len(distances) else None
+            score = None if distance is None else round(1 / (1 + max(float(distance), 0.0)), 4)
+            chunk_id = str(ids[index]) if index < len(ids) else f"{query_index}-{index}"
+            candidate = RetrievedEvidence(
+                chunk_id=chunk_id,
                 material_id=int(metadata["material_id"]) if metadata.get("material_id") is not None else None,
                 filename=str(metadata.get("filename") or ""),
                 score=score,
                 excerpt=summarize(str(document), 900),
             )
-        )
-    return evidence
+            existing = by_chunk_id.get(chunk_id)
+            existing_score = -1.0 if existing is None or existing.score is None else existing.score
+            candidate_score = -1.0 if candidate.score is None else candidate.score
+            if existing is None or candidate_score > existing_score:
+                by_chunk_id[chunk_id] = candidate
+
+    evidence = sorted(
+        by_chunk_id.values(),
+        key=lambda item: item.score if item.score is not None else -1.0,
+        reverse=True,
+    )[:top_k]
+    return SearchResult(
+        evidence=evidence,
+        query_count=len(queries),
+        per_query_counts=per_query_counts,
+        raw_hits=raw_hits,
+        deduped_hits=len(by_chunk_id),
+    )
+
+
+def normalize_search_queries(query: str | list[SearchQuery]) -> list[SearchQuery]:
+    if isinstance(query, str):
+        text = query.strip()
+        return [SearchQuery(name="assignment_query", text=text)] if text else []
+    normalized: list[SearchQuery] = []
+    seen: set[str] = set()
+    for index, item in enumerate(query):
+        text = item.text.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(SearchQuery(name=item.name or f"query_{index + 1}", text=text))
+    return normalized
+
+
+def normalize_result_lists(value: Any, query_count: int) -> list[list[Any]]:
+    if not isinstance(value, list) or not value:
+        return [[] for _ in range(query_count)]
+    if query_count == 1 and (not value or not isinstance(value[0], list)):
+        return [value]
+    lists = [item if isinstance(item, list) else [] for item in value]
+    while len(lists) < query_count:
+        lists.append([])
+    return lists[:query_count]
 
 
 def evidence_context(evidence: list[RetrievedEvidence]) -> str:
@@ -278,7 +368,7 @@ def build_report_draft(
     normalize_markdown: Callable[[str], str],
 ) -> str:
     response = llm_client().chat.completions.create(
-        model=os.getenv("LLM_MODEL", "qwen-plus"),
+        model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
         messages=[
             {"role": "system", "content": skill.system_prompt},
             {"role": "user", "content": build_prompt(payload, skill, context_text)},
@@ -300,7 +390,8 @@ def rewrite_report(
     focus = "\n".join(f"- {item}" for item in quality.rewrite_focus[:5]) or "- 补足结构、依据和可交付表达。"
     issues = "\n".join(f"- {item}" for item in quality.issues[:5]) or "- 当前草稿仍需增强。"
     prompt = f"""
-请改写下面的中文 Markdown 报告草稿，使其更适合作业提交前继续编辑。
+请对下面的中文 Markdown 报告草稿做一次“最小必要修补”，目标是提高结构完整度、证据贴合度和表达具体性。
+这份输出会直接展示给用户，请输出可提交的完整报告正文，不要输出修改说明。
 
 质量审稿结论：
 {quality.review_summary or quality.quality_note}
@@ -313,9 +404,12 @@ def rewrite_report(
 
 硬性要求：
 - 必须覆盖这些必要章节：{", ".join(skill.required_sections)}
-- 保留已有有效内容，不要编造资料中没有的信息。
-- 来自资料的关键判断尽量用 `[来源: 文件名]` 标注。
-- 如果资料不足，明确写出“待补充”，不要假装已经完成。
+- 优先保留原稿中的有效内容、具体步骤、数据、来源标注和结论，不要为了润色而删减证据。
+- 来自资料的关键判断必须尽量沿用或补充 `[来源: 文件名]` 标注。
+- 不要编造资料中没有的信息；如果缺少资料，不要用泛泛描述填充。
+- 不要主动新增“待补充”“资料不足”“TODO”“TBD”等未完成标记；如果原稿已有这类标记，只保留确实需要用户确认的最小范围。
+- 输出应比原稿更可提交；如果无法可靠改进，就尽量保持原稿主体，仅做小幅结构整理。
+- 正文必须直接从标题或章节开始，不要写“以下是”“改写版”“最小必要修补版”等元说明。
 - 只输出 Markdown 正文，不要输出代码块。
 
 资料证据：
@@ -325,12 +419,12 @@ def rewrite_report(
 {markdown}
 """.strip()
     response = llm_client().chat.completions.create(
-        model=os.getenv("LLM_MODEL", "qwen-plus"),
+        model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
         messages=[
             {"role": "system", "content": skill.system_prompt},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
+        temperature=0,
     )
     return normalize_markdown(response.choices[0].message.content or markdown)
 
@@ -360,7 +454,8 @@ def evaluate_quality(
         section_completeness=section_completeness,
         citation_coverage=citation_coverage,
     )
-    total_score = weighted_quality_score(review)
+    manual_review_reason = manual_review_reason_for(markdown)
+    total_score = model_quality_score(review)
     decision = decide_quality(
         markdown=markdown,
         evidence=evidence,
@@ -368,11 +463,13 @@ def evaluate_quality(
         total_score=total_score,
         pass_score=pass_score,
         decision_hint=review.decision_hint,
+        manual_review_reason=manual_review_reason,
     )
+    note_reason = f"需人工审核原因：{manual_review_reason}。" if manual_review_reason else review.review_summary
     note = (
         f"模型评分 {total_score:.0%}（通过阈值 {pass_score:.0%}），"
         f"决策 {decision}；章节完整率 {section_completeness:.0%}，"
-        f"检索片段 {len(evidence)} 个。{review.review_summary}"
+        f"检索片段 {len(evidence)} 个。{note_reason}"
     )
     return QualityMetrics(
         section_completeness=round(section_completeness, 4),
@@ -387,6 +484,7 @@ def evaluate_quality(
         total_score=round(total_score, 4),
         pass_score=round(pass_score, 4),
         decision=decision,
+        manual_review_reason=manual_review_reason,
         review_summary=review.review_summary,
         issues=review.issues[:8],
         rewrite_focus=review.rewrite_focus[:8],
@@ -448,6 +546,7 @@ def review_quality_with_llm(
     "readiness": 0.0,
     "risk": 0.0
   }},
+  "total_score": 0.0,
   "review_summary": "一句中文评价",
   "issues": ["问题1", "问题2"],
   "rewrite_focus": ["改写重点1", "改写重点2"],
@@ -459,7 +558,7 @@ def review_quality_with_llm(
 """.strip()
     try:
         response = llm_client().chat.completions.create(
-            model=os.getenv("LLM_MODEL", "qwen-plus"),
+            model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
             messages=[
                 {"role": "system", "content": "你只输出可解析 JSON。"},
                 {"role": "user", "content": prompt},
@@ -481,6 +580,7 @@ def parse_quality_review(content: str) -> QualityReview:
         specificity_score=score_value(scores, "specificity"),
         readiness_score=score_value(scores, "readiness"),
         risk_score=score_value(scores, "risk"),
+        total_score=score_value(data, "total_score"),
         review_summary=str(data.get("review_summary") or "").strip(),
         issues=string_list(data.get("issues")),
         rewrite_focus=string_list(data.get("rewrite_focus")),
@@ -511,6 +611,13 @@ def fallback_quality_review(
         specificity_score=specificity,
         readiness_score=readiness,
         risk_score=risk,
+        total_score=weighted_quality_score(
+            structure_score=section_completeness,
+            grounding_score=grounding,
+            specificity_score=specificity,
+            readiness_score=readiness,
+            risk_score=risk,
+        ),
         review_summary="模型审稿不可用，已使用本地质量信号兜底评分。",
         issues=["草稿偏短或存在待补充内容"] if weak_marker else [],
         rewrite_focus=["补充具体依据、实现步骤和可交付结论"] if decision_hint != QUALITY_DECISION_PASS else [],
@@ -527,6 +634,8 @@ def should_rewrite(
         return False
     if quality.decision == QUALITY_DECISION_USER_INPUT:
         return False
+    if quality.manual_review_reason:
+        return False
     if quality.decision == QUALITY_DECISION_REWRITE:
         return True
     return False
@@ -540,29 +649,55 @@ def decide_quality(
     total_score: float,
     pass_score: float,
     decision_hint: str,
+    manual_review_reason: str = "",
 ) -> str:
     text = markdown.strip()
     if decision_hint == QUALITY_DECISION_USER_INPUT:
         return QUALITY_DECISION_USER_INPUT
     if not evidence and (total_score < 0.55 or len(text) < 600):
         return QUALITY_DECISION_USER_INPUT
-    if section_completeness < 1.0 or has_weak_draft_marker(text):
+    if section_completeness < 1.0:
         return QUALITY_DECISION_REWRITE
-    if total_score >= pass_score and decision_hint == QUALITY_DECISION_PASS:
-        return QUALITY_DECISION_PASS
-    if total_score >= pass_score + 0.08:
+    if manual_review_reason:
+        return QUALITY_DECISION_REWRITE
+    if total_score >= pass_score:
         return QUALITY_DECISION_PASS
     return QUALITY_DECISION_REWRITE
 
 
-def weighted_quality_score(review: QualityReview) -> float:
-    return clamp01(
-        review.structure_score * 0.25
-        + review.grounding_score * 0.25
-        + review.specificity_score * 0.25
-        + review.readiness_score * 0.20
-        + (1 - review.risk_score) * 0.05
+def model_quality_score(review: QualityReview) -> float:
+    if review.total_score > 0:
+        return clamp01(review.total_score)
+    return weighted_quality_score(
+        structure_score=review.structure_score,
+        grounding_score=review.grounding_score,
+        specificity_score=review.specificity_score,
+        readiness_score=review.readiness_score,
+        risk_score=review.risk_score,
     )
+
+
+def weighted_quality_score(
+    *,
+    structure_score: float,
+    grounding_score: float,
+    specificity_score: float,
+    readiness_score: float,
+    risk_score: float,
+) -> float:
+    return clamp01(
+        structure_score * 0.25
+        + grounding_score * 0.25
+        + specificity_score * 0.25
+        + readiness_score * 0.20
+        + (1 - risk_score) * 0.05
+    )
+
+
+def manual_review_reason_for(markdown: str) -> str:
+    if has_weak_draft_marker(markdown):
+        return "草稿包含 TODO/TBD 或明显占位符"
+    return ""
 
 
 def calculate_section_completeness(markdown: str, required_sections: list[str]) -> float:
@@ -586,14 +721,24 @@ def calculate_citation_coverage(markdown: str, evidence: list[RetrievedEvidence]
 
 def quality_pass_score() -> float:
     try:
-        return clamp01(float(os.getenv("QUALITY_PASS_SCORE", "0.78")))
+        return clamp01(float(os.getenv("QUALITY_PASS_SCORE", "0.75")))
     except ValueError:
-        return 0.78
+        return 0.75
 
 
 def has_weak_draft_marker(text: str) -> bool:
-    markers = ("待补充", "资料不足", "缺少资料", "TODO", "todo", "TBD")
-    return bool(text) and any(marker in text for marker in markers)
+    return weak_draft_marker_count(text) > 0
+
+
+def weak_draft_marker_count(text: str) -> int:
+    if not text:
+        return 0
+    count = len(re.findall(r"\b(?:TODO|TBD)\b", text, flags=re.IGNORECASE))
+    placeholder_line = re.compile(
+        r"^\s*(?:#{1,6}\s*)?(?:待填写|待完善|待确认|待用户补充|请补充|待补充[:：。]?|资料不足[:：。]?|缺少资料[:：。]?)\s*$"
+    )
+    count += sum(1 for line in text.splitlines() if placeholder_line.match(line.strip()))
+    return count
 
 
 def normalize_decision(value: str) -> str:

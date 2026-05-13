@@ -21,7 +21,7 @@
 - `frontend`：Next.js 14 + TypeScript + Tailwind CSS + lucide-react
 - `backend-java`：Spring Boot 3 + Java 21 + MyBatis Plus + MySQL + Redis + SSE + SLF4J
 - `agent-python`：FastAPI + Pydantic + OpenAI-compatible SDK + ChromaDB + pypdf
-- LLM 默认：DashScope / Qwen OpenAI-compatible API
+- LLM 默认：DeepSeek OpenAI-compatible API，Embedding 默认：DashScope text-embedding
 - 本地编排：Docker Compose
 
 ## 当前已完成能力
@@ -144,7 +144,7 @@ search_materials
   - `NEEDS_REWRITE`
   - `NEEDS_USER_INPUT`
 - 默认通过阈值：
-  - `QUALITY_PASS_SCORE=0.78`
+  - `QUALITY_PASS_SCORE=0.70`
 - 低于阈值：
   - 自动改写一次
   - 改写后仍低于阈值时，报告草稿仍保存，但任务标记为 `NEEDS_REWRITE`

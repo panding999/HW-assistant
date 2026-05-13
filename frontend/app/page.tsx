@@ -22,6 +22,7 @@ import {
   Save,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Sun,
   Trash2,
@@ -136,10 +137,14 @@ const emptyMonitoring: MonitoringOverview = {
   kpis: {
     totalTasks: 0,
     successRate: 0,
+    taskCompletionRate: 0,
+    qualityPassRate: 0,
     avgDurationSeconds: 0,
     p95DurationSeconds: 0,
     dynamicPlannerRate: 0,
     rewriteRate: 0,
+    rewriteTriggerRate: 0,
+    rewriteAcceptRate: 0,
     avgRetrievedChunks: 0
   },
   skillDistribution: [],
@@ -659,7 +664,7 @@ export default function HomePage() {
                       <h2 className="mt-1 truncate text-xl font-bold text-slate-950">{selected?.title}</h2>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      <StatusBadge status={activeTask?.status || selected?.status || "DRAFT"} />
+                  <StatusBadge status={latestTask?.status || activeTask?.status || selected?.status || "DRAFT"} />
                       <Button size="icon" variant="ghost" onClick={startEditAssignment} disabled={!selected || isDemo}>
                         <Pencil size={17} />
                       </Button>
@@ -1106,7 +1111,7 @@ export default function HomePage() {
                     <StatusBadge status={latestTask.status} />
                   </div>
                   <p className="text-xs leading-5 text-slate-500">阶段：{stageLabel(latestTask.currentStage || "queued")} · 耗时：{formatDuration(latestTask.startedAt, latestTask.finishedAt)}</p>
-                  {latestTask.routingReason && <p className="mt-2 text-xs leading-5 text-slate-500">路由原因：{latestTask.routingReason}</p>}
+                  {latestTask.routingReason && <p className="mt-2 text-xs leading-5 text-slate-500">识别原因：{latestTask.routingReason}</p>}
                   {latestTask.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{latestTask.draftVersionReason}</p>}
                 </div>
               )}
@@ -1142,18 +1147,20 @@ function MonitoringDashboard({ data, loading, onRefresh }: { data: MonitoringOve
   const hasTasks = kpis.totalTasks > 0;
 
   const kpiItems = [
-    { label: "生成任务", value: String(kpis.totalTasks), hint: "Agent runs", icon: Workflow, accent: "bg-moss-700" },
-    { label: "生成成功率", value: formatPercent(kpis.successRate), hint: "SUCCEEDED / total", icon: CheckCircle2, accent: "bg-emerald-600" },
+    { label: "生成任务", value: String(kpis.totalTasks), hint: "Agent 运行次数", icon: Workflow, accent: "bg-moss-700" },
+    { label: "任务完成率", value: formatPercent(kpis.taskCompletionRate ?? kpis.successRate), hint: "已产出报告 / 总任务", icon: CheckCircle2, accent: "bg-emerald-600" },
+    { label: "质量通过率", value: formatPercent(kpis.qualityPassRate ?? kpis.successRate), hint: "质量门控 PASS", icon: ShieldCheck, accent: "bg-teal-600" },
     { label: "平均耗时", value: formatMonitoringSeconds(kpis.avgDurationSeconds), hint: "端到端生成", icon: Clock3, accent: "bg-sky-600" },
     { label: "P95 耗时", value: formatMonitoringSeconds(kpis.p95DurationSeconds), hint: "慢请求画像", icon: BarChart3, accent: "bg-indigo-600" },
-    { label: "兜底率", value: formatPercent(kpis.dynamicPlannerRate), hint: "dynamic_planner", icon: Sparkles, accent: "bg-amber-500" },
-    { label: "改写率", value: formatPercent(kpis.rewriteRate), hint: "rewrite triggered", icon: RefreshCw, accent: "bg-rose-500" }
+    { label: "动态任务规划率", value: formatPercent(kpis.dynamicPlannerRate), hint: "动态任务规划占比", icon: Sparkles, accent: "bg-amber-500" },
+    { label: "改写触发率", value: formatPercent(kpis.rewriteTriggerRate ?? kpis.rewriteRate), hint: "触发自动改写", icon: RefreshCw, accent: "bg-rose-500" },
+    { label: "改写采纳率", value: formatPercent(kpis.rewriteAcceptRate ?? 0), hint: "改写优于初稿", icon: CheckCircle2, accent: "bg-lime-600" }
   ];
 
   return (
     <section className="monitoring-surface relative mt-3 rounded-xl pb-8">
       <div className="relative z-10">
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         {kpiItems.map((item) => (
           <Card key={item.label} className="group overflow-hidden border-slate-200 bg-white p-0 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-moss-200 hover:shadow-md">
             <div className={`h-1 ${item.accent}`} />
@@ -1253,11 +1260,11 @@ function MonitoringDashboard({ data, loading, onRefresh }: { data: MonitoringOve
         <div className="grid gap-3">
           <Card className="overflow-hidden border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-moss-700">SKILL ROUTING</p>
-              <h2 className="mt-1 text-lg font-bold text-slate-950">Skill 命中分布</h2>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-moss-700">ROUTING</p>
+              <h2 className="mt-1 text-lg font-bold text-slate-950">任务类型识别分布</h2>
             </div>
             {data.skillDistribution.length === 0 ? (
-              <MonitoringEmpty label="暂无 Skill 路由样本" />
+              <MonitoringEmpty label="暂无任务类型识别样本" />
             ) : (
               <div className="space-y-3">
                 {data.skillDistribution.map((item) => (
@@ -1413,7 +1420,7 @@ function statusText(status: string) {
 function stageLabel(stage: string) {
   const labels: Record<string, string> = {
     queued: "任务排队",
-    skill: "Skill 路由",
+    skill: "任务类型识别",
     parse: "资料解析",
     retrieve: "RAG 检索",
     generate: "生成报告草稿",
@@ -1439,7 +1446,7 @@ function skillLabel(skillId?: string) {
     lab_report: "实验报告",
     paper_summary: "论文总结",
     course_qa_report: "课程问答汇报",
-    dynamic_planner: "动态规划"
+    dynamic_planner: "动态任务规划"
   };
   return skillId ? labels[skillId] || skillId : "待识别";
 }

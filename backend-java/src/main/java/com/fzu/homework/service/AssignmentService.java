@@ -42,6 +42,7 @@ public class AssignmentService {
     private final AgentTaskMapper taskMapper;
     private final AgentTaskLogMapper logMapper;
     private final FileStorageService fileStorageService;
+    private final AgentWorkflowService agentWorkflowService;
 
     public AssignmentService(
             AssignmentMapper assignmentMapper,
@@ -49,7 +50,8 @@ public class AssignmentService {
             ReportMapper reportMapper,
             AgentTaskMapper taskMapper,
             AgentTaskLogMapper logMapper,
-            FileStorageService fileStorageService
+            FileStorageService fileStorageService,
+            AgentWorkflowService agentWorkflowService
     ) {
         this.assignmentMapper = assignmentMapper;
         this.materialMapper = materialMapper;
@@ -57,6 +59,7 @@ public class AssignmentService {
         this.taskMapper = taskMapper;
         this.logMapper = logMapper;
         this.fileStorageService = fileStorageService;
+        this.agentWorkflowService = agentWorkflowService;
     }
 
     public Assignment create(AssignmentRequest request) {
@@ -110,6 +113,7 @@ public class AssignmentService {
         taskMapper.delete(Wrappers.<AgentTask>lambdaQuery().eq(AgentTask::getAssignmentId, id));
         reportMapper.delete(Wrappers.<Report>lambdaQuery().eq(Report::getAssignmentId, id));
         assignmentMapper.deleteById(id);
+        agentWorkflowService.deleteAssignmentCollection(id);
         log.info("assignment_deleted assignmentId={}", id);
     }
 

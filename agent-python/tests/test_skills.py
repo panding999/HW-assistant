@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from app.main import ReportRequest, build_prompt, resolve_skill, route_skill_by_rules
+    from app.main import ReportRequest, build_prompt, build_search_queries, resolve_skill, route_skill_by_rules
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(f"optional agent dependency is not installed: {exc.name}") from exc
 
@@ -17,6 +17,7 @@ class SkillRoutingTests(unittest.TestCase):
         self.assertEqual(route.resolved_skill_id, "paper_summary")
         self.assertEqual(route.mode, "known_skill")
         self.assertGreaterEqual(route.confidence, 0.7)
+        self.assertIn("规则路由命中", route.reason)
 
     def test_rule_routes_lab_report_with_high_confidence(self) -> None:
         route = route_skill_by_rules("图像分类实验", "计算机视觉", "实现 CNN 代码并分析实验结果")
@@ -34,6 +35,7 @@ class SkillRoutingTests(unittest.TestCase):
         skill, routing = resolve_skill(payload)
         self.assertEqual(skill.id, "dynamic_planner")
         self.assertEqual(routing.mode, "dynamic_plan")
+        self.assertIn("动态任务规划", routing.reason)
 
     def test_manual_skill_bypasses_auto(self) -> None:
         payload = ReportRequest(
@@ -45,6 +47,7 @@ class SkillRoutingTests(unittest.TestCase):
         skill, routing = resolve_skill(payload)
         self.assertEqual(skill.id, "lab_report")
         self.assertEqual(routing.confidence, 1.0)
+        self.assertIn("用户手动选择", routing.reason)
 
     def test_prompt_contains_required_sections(self) -> None:
         payload = ReportRequest(assignment_id=1, title="论文阅读", skill_id="paper_summary")
@@ -52,6 +55,14 @@ class SkillRoutingTests(unittest.TestCase):
         prompt = build_prompt(payload, skill, "material")
         self.assertIn("研究背景", prompt)
         self.assertIn("汇报提纲", prompt)
+
+    def test_build_search_queries_returns_three_chinese_queries(self) -> None:
+        payload = ReportRequest(assignment_id=1, title="图像分类实验", course="计算机视觉", description="实现 CNN 并分析结果")
+        skill, _ = resolve_skill(payload)
+        queries = build_search_queries(payload, skill)
+        self.assertEqual([item.name for item in queries], ["assignment_query", "skill_query", "section_query"])
+        self.assertEqual(len(queries), 3)
+        self.assertTrue(all("：" in item.text for item in queries))
 
 
 if __name__ == "__main__":

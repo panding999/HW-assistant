@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.agent_runtime import RetrievedEvidence, evaluate_quality, run_report_agent, should_rewrite
+from app.agent_runtime import QualityMetrics, RetrievedEvidence, SearchQuery, decide_quality, evaluate_quality, manual_review_reason_for, run_report_agent, search_materials, should_rewrite
 
 
 class FakeCollection:
@@ -15,6 +15,21 @@ class FakeCollection:
             "documents": [["实验目的内容 实验步骤内容"]],
             "metadatas": [[{"material_id": 10, "filename": "实验要求.md"}]],
             "distances": [[0.25]],
+        }
+
+
+class MultiQueryCollection:
+    def query(self, query_embeddings, n_results, include):
+        self.query_count = len(query_embeddings)
+        return {
+            "ids": [["10-0", "10-1"], ["10-1", "11-0"], ["12-0"]],
+            "documents": [["片段 A", "片段 B"], ["片段 B 更相关", "片段 C"], ["片段 D"]],
+            "metadatas": [
+                [{"material_id": 10, "filename": "a.md"}, {"material_id": 10, "filename": "a.md"}],
+                [{"material_id": 10, "filename": "a.md"}, {"material_id": 11, "filename": "b.md"}],
+                [{"material_id": 12, "filename": "c.md"}],
+            ],
+            "distances": [[0.4, 0.7], [0.1, 0.2], [0.3]],
         }
 
 
@@ -73,14 +88,69 @@ class FakeCompletions:
                     ensure_ascii=False,
                 )
             )
-        if "请改写" in prompt:
+        if "最小必要修补" in prompt:
             return FakeResponse(
                 "# 实验目的\n基于资料说明实验目标。[来源: 实验要求.md]\n\n"
                 "# 实验步骤\n按资料完成环境、实现和验证步骤。[来源: 实验要求.md]"
             )
         return FakeResponse(
-            "# 实验目的\n待补充。\n\n"
+            "# 实验目的\n基于资料说明。\n\n"
             "# 实验步骤\n基于资料说明。[来源: 实验要求.md]"
+        )
+
+
+class WorseRewriteCompletions:
+    def __init__(self):
+        self.quality_calls = 0
+
+    def create(self, **kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        if '"scores"' in prompt and "质量审稿器" in prompt:
+            self.quality_calls += 1
+            if self.quality_calls == 1:
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "scores": {
+                                "structure": 1.0,
+                                "grounding": 0.9,
+                                "specificity": 0.7,
+                                "readiness": 0.72,
+                                "risk": 0.2,
+                            },
+                            "total_score": 0.72,
+                            "review_summary": "初稿可用但仍需增强。",
+                            "issues": ["还需要补充依据"],
+                            "rewrite_focus": ["补充证据"],
+                            "decision_hint": "NEEDS_REWRITE",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "scores": {
+                            "structure": 1.0,
+                            "grounding": 0.5,
+                            "specificity": 0.4,
+                            "readiness": 0.45,
+                            "risk": 0.65,
+                        },
+                        "total_score": 0.6,
+                        "review_summary": "改写后质量下降。",
+                        "issues": ["依据变弱"],
+                        "rewrite_focus": ["恢复原始依据"],
+                        "decision_hint": "NEEDS_REWRITE",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        if "最小必要修补" in prompt:
+            return FakeResponse("# 实验目的\n改写后内容变差。\n\n# 实验步骤\n缺少依据。")
+        return FakeResponse(
+            "# 实验目的\n初稿内容较完整。[来源: 实验要求.md]\n\n"
+            "# 实验步骤\n初稿步骤有依据。[来源: 实验要求.md]"
         )
 
 
@@ -92,6 +162,16 @@ class FakeChat:
 class FakeClient:
     def __init__(self):
         self.chat = FakeChat()
+
+
+class WorseRewriteChat:
+    def __init__(self):
+        self.completions = WorseRewriteCompletions()
+
+
+class WorseRewriteClient:
+    def __init__(self):
+        self.chat = WorseRewriteChat()
 
 
 class FakePayload:
@@ -148,6 +228,44 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.quality.decision, "PASS")
         self.assertTrue(all(step.duration_ms >= 1 for step in result.agent_trace))
 
+    def test_multi_query_search_deduplicates_and_limits_results(self) -> None:
+        collection = MultiQueryCollection()
+        result = search_materials(
+            collection,
+            [
+                SearchQuery(name="assignment_query", text="作业"),
+                SearchQuery(name="skill_query", text="章节"),
+                SearchQuery(name="section_query", text="要求"),
+            ],
+            top_k=3,
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+        )
+        self.assertEqual(result.query_count, 3)
+        self.assertEqual(result.raw_hits, 5)
+        self.assertEqual(result.deduped_hits, 4)
+        self.assertLessEqual(len(result.evidence), 3)
+        self.assertEqual(len({item.chunk_id for item in result.evidence}), len(result.evidence))
+        self.assertEqual(result.evidence[0].chunk_id, "10-1")
+
+    def test_agent_loop_keeps_original_when_rewrite_scores_lower(self) -> None:
+        client = WorseRewriteClient()
+        result = run_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=FakeCollection(),
+            query="query",
+            embed_texts=lambda texts: [[0.1, 0.2]],
+            llm_client=lambda: client,
+            build_prompt=lambda payload, skill, context: context,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+        self.assertIn("初稿内容较完整", result.markdown)
+        self.assertEqual(result.quality.total_score, 0.72)
+        self.assertTrue(result.quality.rewrite_triggered)
+        self.assertIn("已保留初稿", result.draft_version_reason)
+        self.assertIn("accepted_rewrite=false", result.agent_trace[-1].output_summary)
+
     def test_should_rewrite_weak_draft_with_fallback_quality(self) -> None:
         quality = evaluate_quality(
             "# 实验目的\n待补充。",
@@ -162,7 +280,7 @@ class AgentRuntimeTests(unittest.TestCase):
             ],
             rewrite_triggered=False,
         )
-        self.assertTrue(should_rewrite("# 实验目的\n待补充。", quality, []))
+        self.assertFalse(should_rewrite("# 实验目的\n待补充。", quality, []))
 
     def test_no_evidence_short_draft_requests_user_input(self) -> None:
         quality = evaluate_quality(
@@ -173,6 +291,63 @@ class AgentRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(quality.decision, "NEEDS_USER_INPUT")
         self.assertFalse(should_rewrite("# 实验目的\n待补充。", quality, []))
+
+    def test_score_above_threshold_passes_even_when_model_suggests_rewrite(self) -> None:
+        decision = decide_quality(
+            markdown="# 实验目的\n内容完整。\n\n# 实验步骤\n内容完整。",
+            evidence=[
+                RetrievedEvidence(
+                    chunk_id="10-0",
+                    material_id=10,
+                    filename="实验要求.md",
+                    excerpt="实验要求",
+                )
+            ],
+            section_completeness=1.0,
+            total_score=0.84,
+            pass_score=0.78,
+            decision_hint="NEEDS_REWRITE",
+        )
+        self.assertEqual(decision, "PASS")
+
+    def test_weak_marker_requires_manual_review_even_when_score_passes(self) -> None:
+        markdown = "# 实验目的\n内容完整。\n\n# 实验步骤\nTODO"
+        decision = decide_quality(
+            markdown=markdown,
+            evidence=[
+                RetrievedEvidence(
+                    chunk_id="10-0",
+                    material_id=10,
+                    filename="实验要求.md",
+                    excerpt="实验要求",
+                )
+            ],
+            section_completeness=1.0,
+            total_score=0.9,
+            pass_score=0.75,
+            decision_hint="PASS",
+            manual_review_reason=manual_review_reason_for(markdown),
+        )
+        self.assertEqual(decision, "NEEDS_REWRITE")
+        self.assertIn("TODO", manual_review_reason_for(markdown))
+
+    def test_pending_info_heading_alone_does_not_require_manual_review(self) -> None:
+        markdown = "# 待补充信息\n本节概括后续可以扩展的方向，但不包含占位符。"
+        self.assertEqual(manual_review_reason_for(markdown), "")
+
+    def test_manual_review_marker_above_threshold_does_not_auto_rewrite(self) -> None:
+        quality = QualityMetrics(
+            section_completeness=1.0,
+            citation_coverage=1.0,
+            retrieved_chunks=1,
+            rewrite_triggered=False,
+            total_score=0.76,
+            pass_score=0.75,
+            decision="NEEDS_REWRITE",
+            manual_review_reason="草稿包含待补充、资料不足或 TODO 等未完成标记",
+            quality_note="模型评分 76%，需人工审核。",
+        )
+        self.assertFalse(should_rewrite("# 待补充信息\n列出后续需要用户确认的内容。", quality, []))
 
 
 if __name__ == "__main__":
