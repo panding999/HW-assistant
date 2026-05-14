@@ -102,11 +102,17 @@ def get_api_key() -> str:
 
 
 def llm_client() -> OpenAI:
+    provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
+    default_base_url = {
+        "deepseek": "https://api.deepseek.com",
+        "openai": None,
+    }.get(provider, "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    base_url = os.getenv("LLM_BASE_URL") or default_base_url
+    kwargs = {"api_key": get_api_key()}
+    if base_url:
+        kwargs["base_url"] = base_url
     return OpenAI(
-        api_key=get_api_key(),
-        base_url=os.getenv(
-            "LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ),
+        **kwargs,
     )
 
 
@@ -124,7 +130,7 @@ def embedding_client() -> OpenAI:
 def chroma_client() -> chromadb.HttpClient:
     return chromadb.HttpClient(
         host=os.getenv("CHROMA_HOST", "localhost"),
-        port=int(os.getenv("CHROMA_PORT", "8000")),
+        port=int(os.getenv("CHROMA_PORT", "8001")),
     )
 
 

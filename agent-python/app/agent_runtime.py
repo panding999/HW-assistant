@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from pathlib import PurePath
 import time
 from typing import Any, Callable
 
@@ -666,8 +667,6 @@ def decide_quality(
 
 
 def model_quality_score(review: QualityReview) -> float:
-    if review.total_score > 0:
-        return clamp01(review.total_score)
     return weighted_quality_score(
         structure_score=review.structure_score,
         grounding_score=review.grounding_score,
@@ -688,9 +687,9 @@ def weighted_quality_score(
     return clamp01(
         structure_score * 0.25
         + grounding_score * 0.25
-        + specificity_score * 0.25
-        + readiness_score * 0.20
-        + (1 - risk_score) * 0.05
+        + specificity_score * 0.20
+        + readiness_score * 0.15
+        + (1 - risk_score) * 0.15
     )
 
 
@@ -711,19 +710,48 @@ def calculate_section_completeness(markdown: str, required_sections: list[str]) 
 def calculate_citation_coverage(markdown: str, evidence: list[RetrievedEvidence]) -> float:
     if not evidence:
         return 0.0
-    filenames = {item.filename for item in evidence if item.filename}
-    chunk_ids = {item.chunk_id for item in evidence if item.chunk_id}
-    citation_hits = sum(1 for filename in filenames if filename in markdown)
-    citation_hits += sum(1 for chunk_id in chunk_ids if chunk_id in markdown)
-    denominator = max(1, min(len(filenames) + len(chunk_ids), max(len(evidence), 1)))
-    return min(1.0, citation_hits / denominator)
+    citations = extract_citations(markdown)
+    hits = 0
+    for item in evidence:
+        if evidence_is_cited(item, citations):
+            hits += 1
+    return min(1.0, hits / max(len(evidence), 1))
 
 
 def quality_pass_score() -> float:
     try:
-        return clamp01(float(os.getenv("QUALITY_PASS_SCORE", "0.75")))
+        return clamp01(float(os.getenv("QUALITY_PASS_SCORE", "0.70")))
     except ValueError:
-        return 0.75
+        return 0.70
+
+
+def extract_citations(markdown: str) -> set[str]:
+    text = markdown or ""
+    citations: set[str] = set()
+    for match in re.finditer(r"\[(?:来源|source)\s*:\s*([^\]]+)\]", text, flags=re.IGNORECASE):
+        citations.add(match.group(1).strip())
+    for match in re.finditer(r"\[chunk_id\s*:\s*([^\]\|]+)(?:\|[^\]]*)?\]", text, flags=re.IGNORECASE):
+        citations.add(match.group(1).strip())
+    return citations
+
+
+def evidence_is_cited(item: RetrievedEvidence, citations: set[str]) -> bool:
+    if not citations:
+        return False
+    chunk_id = (item.chunk_id or "").strip()
+    filename = (item.filename or "").strip()
+    basename = PurePath(filename).name if filename else ""
+    for citation in citations:
+        normalized = citation.strip()
+        if chunk_id and normalized == chunk_id:
+            return True
+        if chunk_id and normalized.endswith(f"#{chunk_id}"):
+            return True
+        if filename and (normalized == filename or normalized.startswith(f"{filename}#")):
+            return True
+        if basename and (normalized == basename or normalized.startswith(f"{basename}#")):
+            return True
+    return False
 
 
 def has_weak_draft_marker(text: str) -> bool:

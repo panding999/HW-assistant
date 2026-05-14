@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.agent_runtime import QualityMetrics, RetrievedEvidence, SearchQuery, decide_quality, evaluate_quality, manual_review_reason_for, run_report_agent, search_materials, should_rewrite
+from app.agent_runtime import QualityMetrics, RetrievedEvidence, SearchQuery, calculate_citation_coverage, decide_quality, evaluate_quality, manual_review_reason_for, model_quality_score, quality_pass_score, run_report_agent, search_materials, should_rewrite
 
 
 class FakeCollection:
@@ -114,9 +114,9 @@ class WorseRewriteCompletions:
                             "scores": {
                                 "structure": 1.0,
                                 "grounding": 0.9,
-                                "specificity": 0.7,
-                                "readiness": 0.72,
-                                "risk": 0.2,
+                                "specificity": 0.4,
+                                "readiness": 0.45,
+                                "risk": 0.65,
                             },
                             "total_score": 0.72,
                             "review_summary": "初稿可用但仍需增强。",
@@ -261,7 +261,7 @@ class AgentRuntimeTests(unittest.TestCase):
             logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
         )
         self.assertIn("初稿内容较完整", result.markdown)
-        self.assertEqual(result.quality.total_score, 0.72)
+        self.assertEqual(result.quality.total_score, 0.675)
         self.assertTrue(result.quality.rewrite_triggered)
         self.assertIn("已保留初稿", result.draft_version_reason)
         self.assertIn("accepted_rewrite=false", result.agent_trace[-1].output_summary)
@@ -348,6 +348,38 @@ class AgentRuntimeTests(unittest.TestCase):
             quality_note="模型评分 76%，需人工审核。",
         )
         self.assertFalse(should_rewrite("# 待补充信息\n列出后续需要用户确认的内容。", quality, []))
+
+    def test_citation_coverage_requires_explicit_source_marker(self) -> None:
+        evidence = [
+            RetrievedEvidence(chunk_id="10-0", material_id=10, filename="实验要求.pdf", excerpt="实验二"),
+            RetrievedEvidence(chunk_id="11-0", material_id=11, filename="课程 资料.md", excerpt="要求"),
+        ]
+        markdown = "实验要求不是引用正文。\n\n结论来自资料。[来源: 课程 资料.md#11-0]"
+        self.assertEqual(calculate_citation_coverage(markdown, evidence), 0.5)
+
+    def test_citation_coverage_accepts_chunk_id_marker(self) -> None:
+        evidence = [
+            RetrievedEvidence(chunk_id="10-0", material_id=10, filename="实验要求.pdf", excerpt="实验二"),
+        ]
+        self.assertEqual(calculate_citation_coverage("结论。[chunk_id: 10-0 | source: 实验要求.pdf]", evidence), 1.0)
+
+    def test_quality_pass_score_default_matches_env_example(self) -> None:
+        self.assertEqual(quality_pass_score(), 0.70)
+
+    def test_model_total_score_is_recomputed_from_dimensions(self) -> None:
+        review = type(
+            "Review",
+            (),
+            {
+                "total_score": 0.99,
+                "structure_score": 1.0,
+                "grounding_score": 1.0,
+                "specificity_score": 1.0,
+                "readiness_score": 1.0,
+                "risk_score": 1.0,
+            },
+        )()
+        self.assertAlmostEqual(model_quality_score(review), 0.85)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import com.fzu.homework.domain.Material;
 import com.fzu.homework.dto.AssignmentRequest;
 import com.fzu.homework.mapper.AgentTaskLogMapper;
 import com.fzu.homework.mapper.AgentTaskMapper;
+import com.fzu.homework.service.AgentTaskRunner;
 import com.fzu.homework.service.AgentWorkflowService;
 import com.fzu.homework.service.AssignmentService;
 import com.fzu.homework.service.TaskLogService;
@@ -33,6 +34,7 @@ import java.util.Map;
 public class AssignmentController {
     private final AssignmentService assignmentService;
     private final AgentWorkflowService agentWorkflowService;
+    private final AgentTaskRunner agentTaskRunner;
     private final AgentTaskMapper taskMapper;
     private final AgentTaskLogMapper logMapper;
     private final TaskLogService taskLogService;
@@ -40,12 +42,14 @@ public class AssignmentController {
     public AssignmentController(
             AssignmentService assignmentService,
             AgentWorkflowService agentWorkflowService,
+            AgentTaskRunner agentTaskRunner,
             AgentTaskMapper taskMapper,
             AgentTaskLogMapper logMapper,
             TaskLogService taskLogService
     ) {
         this.assignmentService = assignmentService;
         this.agentWorkflowService = agentWorkflowService;
+        this.agentTaskRunner = agentTaskRunner;
         this.taskMapper = taskMapper;
         this.logMapper = logMapper;
         this.taskLogService = taskLogService;
@@ -106,7 +110,7 @@ public class AssignmentController {
     public AgentTask generate(@PathVariable Long id) {
         assignmentService.requireAssignment(id);
         AgentTask task = agentWorkflowService.createReportTask(id);
-        agentWorkflowService.runReportTask(task.getId());
+        agentTaskRunner.runReportTask(task.getId());
         return task;
     }
 
@@ -117,7 +121,9 @@ public class AssignmentController {
 
     @PostMapping("/tasks/{taskId}/retry")
     public AgentTask retryTask(@PathVariable Long taskId) {
-        return agentWorkflowService.retryTask(taskId);
+        AgentTask task = agentWorkflowService.retryTask(taskId);
+        agentTaskRunner.runReportTask(task.getId());
+        return task;
     }
 
     @GetMapping("/tasks/{taskId}")

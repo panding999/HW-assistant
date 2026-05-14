@@ -20,6 +20,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Service
 public class TaskLogService {
     private static final Logger log = LoggerFactory.getLogger(TaskLogService.class);
+    private static final long SSE_TIMEOUT_MS = 10 * 60 * 1000L;
     private final AgentTaskMapper taskMapper;
     private final AgentTaskLogMapper logMapper;
     private final ConcurrentHashMap<Long, CopyOnWriteArrayList<SseEmitter>> emitters = new ConcurrentHashMap<>();
@@ -37,7 +38,7 @@ public class TaskLogService {
             throw new IllegalArgumentException("Task not found: " + taskId);
         }
 
-        SseEmitter emitter = new SseEmitter(0L);
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         emitters.computeIfAbsent(taskId, ignored -> new CopyOnWriteArrayList<>()).add(emitter);
         log.info("task_log_subscribe taskId={} subscribers={}", taskId, emitters.get(taskId).size());
 

@@ -32,7 +32,7 @@ flowchart LR
 
 核心职责：
 - 前端负责作业管理、资料上传、报告预览编辑、任务进度展示、监控面板。
-- Spring Boot 负责业务数据、文件存储、任务编排、SSE 日志、报告版本。
+- Spring Boot 负责业务数据、文件存储、任务创建、异步任务调度、SSE 日志、报告版本。
 - Python Agent 负责资料解析、向量化、RAG 检索、任务类型识别、报告生成、质量检查和自动改写。
 - ChromaDB 存储每个作业的资料向量索引。
 - MySQL 存储作业、材料、报告、任务、任务日志和 Agent 结果 JSON。
@@ -82,6 +82,10 @@ flowchart TD
 7. Agent 调用 embedding 模型生成向量。
 8. Agent 将 chunk、metadata、embedding upsert 到 ChromaDB 的 `assignment_{id}` collection。
 9. 后端把资料状态改成 `INDEXED`，并推送“资料解析完成”日志。
+
+配置说明：
+- Docker 内部网络中，Agent 通过 `CHROMA_HOST=chromadb` 和 `CHROMA_PORT=8000` 访问 ChromaDB。
+- 宿主机本地开发时，ChromaDB 默认映射到 `localhost:8001`，Agent 本地默认端口也是 `8001`。
 
 面试讲法：
 
@@ -155,6 +159,7 @@ section_query = 必要章节 + 作业要求
 - 不输出 `以下是`、`改写版`、`最小必要修补版` 等元说明。
 - 不主动输出 `待补充`、`资料不足`、`TODO`、`TBD` 等占位符。
 - 使用资料时添加 `[来源: filename]` 形式的来源标注。
+- 也支持更精确的 `[来源: filename#chunk_id]` 或 `[chunk_id: id]` 标注，便于后续计算引用覆盖率。
 
 面试讲法：
 
@@ -180,6 +185,15 @@ section_query = 必要章节 + 作业要求
 - `specificity`：是否有具体步骤、指标和建议。
 - `readiness`：是否接近可提交。
 - `risk`：是否存在幻觉、无依据断言、任务跑偏、资料不足等风险。
+
+总分计算：
+- 模型返回五个维度评分和审稿意见。
+- 系统不直接信任模型返回的 `total_score`，而是按本地权重重算总分，避免模型自报总分过高。
+- 当前权重为：结构 25%、证据贴合 25%、具体性 20%、可提交性 15%、低风险 15%。
+
+引用覆盖率：
+- 只统计明确引用标记，如 `[来源: 实验要求.pdf]`、`[来源: 实验要求.pdf#10-0]`、`[chunk_id: 10-0]`。
+- 不再因为正文碰巧出现文件名或 chunk id 就算作引用命中。
 
 系统输出：
 - `total_score`
@@ -248,17 +262,24 @@ section_query = 必要章节 + 作业要求
 典型阶段：
 - `queued`
 - `parse`
+- `skill`
 - `retrieve`
 - `generate`
-- `skill`
 - `quality`
 - `rewrite`
 - `done`
 - `failed`
 
 注意：
-- 当前 Python Agent 内部 trace 是一次性返回给后端的，后端再补充日志。
-- 所以前端 SSE 是任务日志实时展示，但 Agent 内部阶段还不是逐 token 或逐工具实时流式回传。
+- `parse` 阶段由 Java 后端在调用 `/agent/index` 前后实时推送。
+- Python Agent 内部的 `skill/retrieve/generate/quality/rewrite` trace 仍是一次性返回给后端，后端按阶段补充任务日志。
+- 前端 SSE 是任务日志级别的实时展示，还不是逐 token 或逐工具流式回传。
+- SSE 连接设置了 10 分钟超时，并在 `FAILED` 或 `done` 终态后主动完成连接。
+
+异步执行：
+- `AssignmentController` 只负责创建任务并返回 `AgentTask`。
+- `AgentTaskRunner` 作为独立 Spring Bean 承载 `@Async`，再调用 `AgentWorkflowService.runReportTask`。
+- 这样避免同一个 Service 内部自调用绕过 Spring AOP，重试任务也不会阻塞接口请求。
 
 ## 数据监控流程
 

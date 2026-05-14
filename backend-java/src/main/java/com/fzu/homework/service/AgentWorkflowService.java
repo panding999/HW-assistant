@@ -15,7 +15,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
@@ -90,11 +89,9 @@ public class AgentWorkflowService {
             throw new IllegalArgumentException("Only failed tasks can be retried.");
         }
         AgentTask task = createReportTask(oldTask.getAssignmentId());
-        runReportTask(task.getId());
         return task;
     }
 
-    @Async
     public void runReportTask(Long taskId) {
         AgentTask task = taskMapper.selectById(taskId);
         if (task == null) {
@@ -164,9 +161,6 @@ public class AgentWorkflowService {
             });
             taskLogService.push(taskId, currentStage, "SUCCEEDED", "资料解析完成，已向量化 " + chunks + " 个资料片段。");
 
-            currentStage = "retrieve";
-            taskLogService.push(taskId, currentStage, "RUNNING", "正在执行 RAG 检索。");
-
             Map<String, Object> reportPayload = new LinkedHashMap<>();
             reportPayload.put("assignment_id", assignment.getId());
             reportPayload.put("title", assignment.getTitle());
@@ -176,7 +170,7 @@ public class AgentWorkflowService {
             reportPayload.put("top_k", 8);
 
             currentStage = "generate";
-            taskLogService.push(taskId, currentStage, "RUNNING", "正在调用 Agent 生成报告草稿。");
+            taskLogService.push(taskId, "skill", "RUNNING", "正在识别任务类型并规划生成策略。");
             stageStarted = System.nanoTime();
             Map<?, ?> reportResponse = restClient.post()
                     .uri("/agent/generate-report")
@@ -232,13 +226,13 @@ public class AgentWorkflowService {
                 taskMapper.updateById(completed);
             }
 
-            taskLogService.push(taskId, "retrieve", "SUCCEEDED", "RAG 检索完成，命中 " + retrievedCount + " 个资料片段。");
             taskLogService.push(taskId, "skill", "SUCCEEDED", routingMessage(resolvedSkillId, routingMode, routingConfidence, routingReason));
+            taskLogService.push(taskId, "retrieve", "SUCCEEDED", "RAG 检索完成，命中 " + retrievedCount + " 个资料片段。");
+            taskLogService.push(taskId, "generate", "SUCCEEDED", "已使用 " + skillLabel(resolvedSkillId) + " 生成草稿，可以开始编辑。");
             taskLogService.push(taskId, "quality", finalStatus, qualityNote);
             if (rewriteTriggered) {
                 taskLogService.push(taskId, "rewrite", finalStatus, draftVersionReason);
             }
-            taskLogService.push(taskId, currentStage, "SUCCEEDED", "已使用 " + skillLabel(resolvedSkillId) + " 生成草稿，可以开始编辑。");
             taskLogService.push(taskId, "done", finalStatus, finalMessage(finalStatus));
             log.info(
                     "report_task_done taskId={} assignmentId={} status={} durationMs={}",

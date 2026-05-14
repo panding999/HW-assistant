@@ -139,6 +139,8 @@ docker compose up --build
 - Python Agent Docs: http://localhost:8000/docs
 - ChromaDB: http://localhost:8001
 
+Docker 网络内 Agent 访问 ChromaDB 使用容器端口 `8000`；宿主机本地开发默认访问映射端口 `8001`。
+
 ### 3. 基本使用
 
 1. 打开 `http://localhost:3000`。
