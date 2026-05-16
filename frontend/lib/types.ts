@@ -77,6 +77,27 @@ export type RetrievedEvidence = {
   filename?: string;
   score?: number;
   excerpt?: string;
+  parent_id?: string;
+  section_title?: string;
+  source_type?: string;
+  vector_score?: number;
+  keyword_score?: number;
+  hybrid_score?: number;
+  document_summary?: string;
+  document_outline?: string;
+  section_summary?: string;
+  key_terms?: string;
+};
+
+export type AgentTraceStep = {
+  step_index: number;
+  stage: string;
+  tool_name: string;
+  input_summary: string;
+  output_summary: string;
+  status: string;
+  duration_ms: number;
+  details?: Record<string, unknown>;
 };
 
 export type AgentTaskLog = {

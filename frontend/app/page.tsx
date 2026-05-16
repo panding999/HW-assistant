@@ -35,6 +35,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { API_BASE_URL, api } from "@/lib/api";
 import type {
+  AgentQualityMetrics,
+  AgentTraceStep,
   AgentTask,
   AgentTaskLog,
   Assignment,
@@ -42,7 +44,8 @@ import type {
   DashboardSummary,
   Material,
   MonitoringOverview,
-  Report
+  Report,
+  RetrievedEvidence
 } from "@/lib/types";
 
 const demoAssignments: Assignment[] = [
@@ -218,6 +221,9 @@ export default function HomePage() {
   const visibleLogs = useMemo(() => latestStageLogs(logs), [logs]);
   const isDemo = selected?.id < 0;
   const latestTask = taskHistory[0] ?? activeTask;
+  const latestTrace = useMemo(() => parseJsonList<AgentTraceStep>(latestTask?.agentTraceJson), [latestTask?.agentTraceJson]);
+  const latestEvidence = useMemo(() => parseJsonList<RetrievedEvidence>(latestTask?.retrievedEvidenceJson), [latestTask?.retrievedEvidenceJson]);
+  const latestQuality = useMemo(() => parseJsonObject<AgentQualityMetrics>(latestTask?.qualityMetricsJson), [latestTask?.qualityMetricsJson]);
   const overdueAssignments = useMemo(
     () => assignments.filter((assignment) => isOverdue(assignment.dueAt)),
     [assignments]
@@ -1113,6 +1119,37 @@ export default function HomePage() {
                   <p className="text-xs leading-5 text-slate-500">阶段：{stageLabel(latestTask.currentStage || "queued")} · 耗时：{formatDuration(latestTask.startedAt, latestTask.finishedAt)}</p>
                   {latestTask.routingReason && <p className="mt-2 text-xs leading-5 text-slate-500">识别原因：{latestTask.routingReason}</p>}
                   {latestTask.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{latestTask.draftVersionReason}</p>}
+                  {(latestTrace.length > 0 || latestEvidence.length > 0 || latestQuality) && (
+                    <div className="mt-3 space-y-3">
+                      {latestTrace.length > 0 && (
+                        <div>
+                          <p className="mb-1.5 text-xs font-semibold text-slate-700">Agent Trace</p>
+                          <div className="space-y-1.5">
+                            {latestTrace.slice(0, 6).map((step) => (
+                              <TraceMini key={`${step.step_index}-${step.tool_name}`} step={step} />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {latestEvidence.length > 0 && (
+                        <div>
+                          <p className="mb-1.5 text-xs font-semibold text-slate-700">RAG Evidence</p>
+                          <div className="space-y-1.5">
+                            {latestEvidence.slice(0, 3).map((item) => (
+                              <EvidenceMini key={item.chunk_id} evidence={item} />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {latestQuality && (
+                        <div className="grid grid-cols-3 gap-2 text-xs">
+                          <InfoPill label="质量分" value={formatPercent(latestQuality.total_score ?? 0)} />
+                          <InfoPill label="引用覆盖" value={formatPercent(latestQuality.citation_coverage ?? 0)} />
+                          <InfoPill label="证据片段" value={`${latestQuality.retrieved_chunks ?? latestEvidence.length}`} />
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1120,6 +1157,58 @@ export default function HomePage() {
         </div>
       )}
     </main>
+  );
+}
+
+function TraceMini({ step }: { step: AgentTraceStep }) {
+  const details = step.details ?? {};
+  const plan = typeof details.plan === "string" ? details.plan : "";
+  const stats = [
+    typeof details.query_count === "number" ? `${details.query_count} queries` : "",
+    typeof details.raw_hits === "number" ? `${details.raw_hits} raw` : "",
+    typeof details.deduped_hits === "number" ? `${details.deduped_hits} deduped` : "",
+    typeof details.parent_merged_hits === "number" ? `${details.parent_merged_hits} parents` : ""
+  ].filter(Boolean);
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate text-xs font-medium text-slate-800">{step.step_index}. {stageLabel(step.stage)} · {step.tool_name}</p>
+        <span className="shrink-0 text-[11px] text-slate-500">{formatMonitoringMs(step.duration_ms)}</span>
+      </div>
+      <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">{step.output_summary}</p>
+      {stats.length > 0 && <p className="mt-1 text-[11px] text-moss-700">{stats.join(" · ")}</p>}
+      {plan && <p className="mt-1 line-clamp-3 whitespace-pre-line text-[11px] leading-4 text-slate-500">{plan}</p>}
+    </div>
+  );
+}
+
+function EvidenceMini({ evidence }: { evidence: RetrievedEvidence }) {
+  const score = evidence.hybrid_score ?? evidence.score;
+  return (
+    <div className="rounded-lg border border-slate-100 bg-white p-2 text-xs dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate font-medium text-slate-800">{evidence.filename || "unknown"}</p>
+        {typeof score === "number" && <span className="shrink-0 text-[11px] text-moss-700">{Math.round(score * 100)}%</span>}
+      </div>
+      <p className="mt-1 truncate text-[11px] text-slate-500">
+        {evidence.section_title || "未标注章节"} · {evidence.parent_id || evidence.chunk_id}
+      </p>
+      <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">{evidence.excerpt}</p>
+      {(typeof evidence.vector_score === "number" || typeof evidence.keyword_score === "number") && (
+        <p className="mt-1 text-[11px] text-slate-400">
+          vector {formatScore(evidence.vector_score)} · keyword {formatScore(evidence.keyword_score)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function InfoPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-900">
+      <p className="text-[11px] text-slate-500">{label}</p>
+      <p className="mt-0.5 font-semibold text-slate-900">{value}</p>
+    </div>
   );
 }
 
@@ -1457,6 +1546,26 @@ function normalizeMarkdown(markdown: string) {
   return fenced ? fenced[1].trim() : trimmed;
 }
 
+function parseJsonList<T>(value?: string): T[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseJsonObject<T>(value?: string): T | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as T : null;
+  } catch {
+    return null;
+  }
+}
+
 function formatDue(dueAt?: string) {
   return dueAt ? dueAt.replace("T", " ").slice(0, 16) : "未设置";
 }
@@ -1490,6 +1599,10 @@ function formatMonitoringSeconds(value?: number | null) {
 
 function formatMonitoringMs(value: number) {
   return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)}ms`;
+}
+
+function formatScore(value?: number) {
+  return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
 }
 
 function barPercent(value: number, max: number) {

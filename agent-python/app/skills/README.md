@@ -1,6 +1,10 @@
 # Agent Skills
 
-Each subdirectory is one portable skill package:
+This directory contains **project-specific business skills** for the Python Agent runtime.
+
+They are not Codex/Claude tool skills. A Codex/Claude-style skill may include folders such as `references/`, `scripts/`, or `assets/`; this project does not need that format for runtime report generation.
+
+Each subdirectory is one lightweight business skill package:
 
 ```text
 skills/
@@ -27,8 +31,15 @@ skills/
 - core requirements
 - output format
 
-This structure supports progressive disclosure:
+This structure supports progressive disclosure inside this project:
 
 1. The registry reads lightweight metadata from `skill.json`.
 2. The agent loads the full `SKILL.md` only for the selected skill.
-3. A skill from another repository can be installed by copying its folder here.
+3. The selected skill's `system_prompt`, `query_hint`, `required_sections`, and `SKILL.md` instructions are used to construct RAG queries and report-generation prompts.
+
+Current built-in skills:
+
+- `lab_report`: lab reports, programming practice, experiment analysis.
+- `paper_summary`: paper reading, literature summary, classroom presentation.
+- `course_qa_report`: course-material QA and presentation reports.
+- `dynamic_planner`: open-ended assignments that need a report outline before writing.

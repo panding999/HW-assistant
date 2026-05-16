@@ -22,6 +22,16 @@ class RetrievedEvidence(BaseModel):
     filename: str = ""
     score: float | None = None
     excerpt: str = ""
+    parent_id: str | None = None
+    section_title: str = ""
+    source_type: str = "child"
+    vector_score: float | None = None
+    keyword_score: float | None = None
+    hybrid_score: float | None = None
+    document_summary: str = ""
+    document_outline: str = ""
+    section_summary: str = ""
+    key_terms: str = ""
 
 
 class SearchQuery(BaseModel):
@@ -35,6 +45,7 @@ class SearchResult(BaseModel):
     per_query_counts: dict[str, int] = {}
     raw_hits: int
     deduped_hits: int
+    parent_merged_hits: int = 0
 
 
 class AgentTraceStep(BaseModel):
@@ -45,6 +56,7 @@ class AgentTraceStep(BaseModel):
     output_summary: str
     status: str
     duration_ms: int
+    details: dict[str, Any] = {}
 
 
 class QualityMetrics(BaseModel):
@@ -99,7 +111,7 @@ def run_report_agent(
     build_prompt: Callable[[Any, Any, str], str],
     normalize_markdown: Callable[[str], str],
     logger: logging.Logger,
-    max_steps: int = 4,
+    max_steps: int = 5,
 ) -> AgentRunResult:
     trace: list[AgentTraceStep] = []
 
@@ -111,6 +123,7 @@ def run_report_agent(
         started: float,
         output_summary: str,
         status: str = "SUCCEEDED",
+        details: dict[str, Any] | None = None,
     ) -> None:
         trace.append(
             AgentTraceStep(
@@ -121,6 +134,7 @@ def run_report_agent(
                 output_summary=output_summary,
                 status=status,
                 duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
+                details=details or {},
             )
         )
 
@@ -131,8 +145,28 @@ def run_report_agent(
         max_steps,
     )
 
+    report_plan = ""
+    effective_query = query
+    if getattr(skill, "id", "") == "dynamic_planner":
+        started = time.perf_counter()
+        report_plan = plan_report_outline(payload, skill, llm_client)
+        effective_query = append_plan_query(query, report_plan)
+        record(
+            stage="plan",
+            tool_name="plan_report_outline",
+            input_summary=f"skill={skill.id}",
+            output_summary=summarize(report_plan, 260),
+            started=started,
+            details={"plan": report_plan},
+        )
+        logger.info(
+            "tool_done assignment_id=%s tool=plan_report_outline chars=%s",
+            payload.assignment_id,
+            len(report_plan),
+        )
+
     started = time.perf_counter()
-    search_result = search_materials(collection, query, payload.top_k, embed_texts)
+    search_result = search_materials(collection, effective_query, payload.top_k, embed_texts)
     evidence = search_result.evidence
     context_text = evidence_context(evidence)
     record(
@@ -141,9 +175,18 @@ def run_report_agent(
         input_summary=f"top_k={payload.top_k} query_count={search_result.query_count}",
         output_summary=(
             f"raw_hits={search_result.raw_hits}; deduped={search_result.deduped_hits}; "
-            f"retrieved={len(evidence)}; per_query={search_result.per_query_counts}"
+            f"parents={search_result.parent_merged_hits}; retrieved={len(evidence)}; "
+            f"per_query={search_result.per_query_counts}"
         ),
         started=started,
+        details={
+            "query_count": search_result.query_count,
+            "per_query_counts": search_result.per_query_counts,
+            "raw_hits": search_result.raw_hits,
+            "deduped_hits": search_result.deduped_hits,
+            "parent_merged_hits": search_result.parent_merged_hits,
+            "retrieved": len(evidence),
+        },
     )
     logger.info(
         "tool_done assignment_id=%s tool=search_materials retrieved=%s",
@@ -152,7 +195,7 @@ def run_report_agent(
     )
 
     started = time.perf_counter()
-    markdown = build_report_draft(payload, skill, context_text, llm_client, build_prompt, normalize_markdown)
+    markdown = build_report_draft(payload, skill, context_text, llm_client, build_prompt, normalize_markdown, report_plan)
     record(
         stage="generate",
         tool_name="build_report_draft",
@@ -274,7 +317,7 @@ def search_materials(
         return SearchResult(evidence=[], query_count=0, raw_hits=0, deduped_hits=0)
     results = collection.query(
         query_embeddings=query_embeddings,
-        n_results=top_k,
+        n_results=max(top_k * 2, top_k),
         include=["documents", "metadatas", "distances"],
     )
     documents_by_query = normalize_result_lists(results.get("documents"), len(queries))
@@ -295,32 +338,51 @@ def search_materials(
         for index, document in enumerate(documents):
             metadata = metadatas[index] if index < len(metadatas) and metadatas[index] else {}
             distance = distances[index] if index < len(distances) else None
-            score = None if distance is None else round(1 / (1 + max(float(distance), 0.0)), 4)
+            vector_score = None if distance is None else round(1 / (1 + max(float(distance), 0.0)), 4)
+            keyword_score = keyword_match_score(query_item.text, str(document), metadata)
+            hybrid_score = round(((vector_score or 0.0) * 0.55) + (keyword_score * 0.45), 4)
             chunk_id = str(ids[index]) if index < len(ids) else f"{query_index}-{index}"
+            parent_excerpt = str(metadata.get("parent_excerpt") or "")
+            child_excerpt = summarize(str(document), 700)
+            excerpt = child_excerpt
+            if parent_excerpt and parent_excerpt.strip() != child_excerpt.strip():
+                excerpt = f"{summarize(parent_excerpt, 900)}\n\n匹配片段：{child_excerpt}"
             candidate = RetrievedEvidence(
                 chunk_id=chunk_id,
                 material_id=int(metadata["material_id"]) if metadata.get("material_id") is not None else None,
                 filename=str(metadata.get("filename") or ""),
-                score=score,
-                excerpt=summarize(str(document), 900),
+                score=hybrid_score,
+                excerpt=summarize(excerpt, 1200),
+                parent_id=str(metadata.get("parent_id") or "") or None,
+                section_title=str(metadata.get("section_title") or ""),
+                source_type=str(metadata.get("source_type") or "child"),
+                vector_score=vector_score,
+                keyword_score=round(keyword_score, 4),
+                hybrid_score=hybrid_score,
+                document_summary=str(metadata.get("document_summary") or ""),
+                document_outline=str(metadata.get("document_outline") or ""),
+                section_summary=str(metadata.get("section_summary") or ""),
+                key_terms=str(metadata.get("key_terms") or ""),
             )
             existing = by_chunk_id.get(chunk_id)
-            existing_score = -1.0 if existing is None or existing.score is None else existing.score
-            candidate_score = -1.0 if candidate.score is None else candidate.score
+            existing_score = -1.0 if existing is None or existing.hybrid_score is None else existing.hybrid_score
+            candidate_score = -1.0 if candidate.hybrid_score is None else candidate.hybrid_score
             if existing is None or candidate_score > existing_score:
                 by_chunk_id[chunk_id] = candidate
 
     evidence = sorted(
         by_chunk_id.values(),
-        key=lambda item: item.score if item.score is not None else -1.0,
+        key=lambda item: item.hybrid_score if item.hybrid_score is not None else -1.0,
         reverse=True,
     )[:top_k]
+    parent_merged_hits = len({item.parent_id for item in by_chunk_id.values() if item.parent_id})
     return SearchResult(
         evidence=evidence,
         query_count=len(queries),
         per_query_counts=per_query_counts,
         raw_hits=raw_hits,
         deduped_hits=len(by_chunk_id),
+        parent_merged_hits=parent_merged_hits,
     )
 
 
@@ -339,6 +401,42 @@ def normalize_search_queries(query: str | list[SearchQuery]) -> list[SearchQuery
     return normalized
 
 
+def keyword_match_score(query_text: str, document: str, metadata: dict[str, Any]) -> float:
+    terms = extract_keywords(query_text)
+    if not terms:
+        return 0.0
+    haystack = " ".join(
+        [
+            document,
+            str(metadata.get("filename") or ""),
+            str(metadata.get("section_title") or ""),
+            str(metadata.get("section_summary") or ""),
+            str(metadata.get("key_terms") or ""),
+        ]
+    ).lower()
+    hits = sum(1 for term in terms if term.lower() in haystack)
+    section_bonus = 0.15 if str(metadata.get("section_title") or "").lower() in query_text.lower() else 0.0
+    filename_bonus = 0.10 if str(metadata.get("filename") or "").lower() in query_text.lower() else 0.0
+    return min(1.0, hits / max(len(terms), 1) + section_bonus + filename_bonus)
+
+
+def extract_keywords(text: str) -> list[str]:
+    raw = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_+-]{2,}|\d+(?:\.\d+)?", text or "")
+    stopwords = {
+        "作业", "报告", "资料", "生成", "章节", "内容", "要求", "根据", "当前", "需要", "说明", "分析",
+        "the", "and", "for", "with", "from", "this", "that",
+    }
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        key = item.lower()
+        if key in stopwords or key in seen:
+            continue
+        seen.add(key)
+        keywords.append(item)
+    return keywords[:32]
+
+
 def normalize_result_lists(value: Any, query_count: int) -> list[list[Any]]:
     if not isinstance(value, list) or not value:
         return [[] for _ in range(query_count)]
@@ -354,9 +452,30 @@ def evidence_context(evidence: list[RetrievedEvidence]) -> str:
     if not evidence:
         return ""
     blocks = []
+    summary_blocks = []
+    seen_summaries: set[str] = set()
     for item in evidence:
-        source = f"[chunk_id: {item.chunk_id} | source: {item.filename or 'unknown'}]"
+        summary_key = f"{item.filename}:{item.document_summary}:{item.document_outline}"
+        if item.document_summary and summary_key not in seen_summaries:
+            seen_summaries.add(summary_key)
+            summary_blocks.append(
+                f"资料全局摘要 [{item.filename or 'unknown'}]\n"
+                f"{item.document_summary}\n"
+                f"{item.document_outline}".strip()
+            )
+    if summary_blocks:
+        blocks.append("\n\n".join(summary_blocks))
+    for item in evidence:
+        source_parts = [f"chunk_id: {item.chunk_id}", f"source: {item.filename or 'unknown'}"]
+        if item.section_title:
+            source_parts.append(f"section: {item.section_title}")
+        if item.parent_id:
+            source_parts.append(f"parent: {item.parent_id}")
+        source = f"[{' | '.join(source_parts)}]"
+        section_summary = f"章节摘要：{item.section_summary}\n" if item.section_summary else ""
         blocks.append(f"{source}\n{item.excerpt}")
+        if section_summary:
+            blocks[-1] = f"{source}\n{section_summary}{item.excerpt}"
     return "\n\n---\n\n".join(blocks)
 
 
@@ -367,16 +486,57 @@ def build_report_draft(
     llm_client: Callable[[], Any],
     build_prompt: Callable[[Any, Any, str], str],
     normalize_markdown: Callable[[str], str],
+    report_plan: str = "",
 ) -> str:
+    try:
+        user_prompt = build_prompt(payload, skill, context_text, report_plan)
+    except TypeError:
+        user_prompt = build_prompt(payload, skill, context_text)
     response = llm_client().chat.completions.create(
         model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
         messages=[
             {"role": "system", "content": skill.system_prompt},
-            {"role": "user", "content": build_prompt(payload, skill, context_text)},
+            {"role": "user", "content": user_prompt},
         ],
         temperature=0.3,
     )
     return normalize_markdown(response.choices[0].message.content or "")
+
+
+def plan_report_outline(payload: Any, skill: Any, llm_client: Callable[[], Any]) -> str:
+    prompt = f"""
+请先为当前开放型作业设计一份中文报告写作计划。只输出 Markdown，不要写正式报告正文。
+
+作业标题：{getattr(payload, "title", "")}
+课程：{getattr(payload, "course", "") or "未提供"}
+作业说明：{getattr(payload, "description", "") or "未提供"}
+
+计划必须包含：
+- 建议报告章节
+- 每个章节的写作目标
+- 每个章节需要检索的资料关键词
+- 可能缺失的信息或需要谨慎表达的地方
+""".strip()
+    response = llm_client().chat.completions.create(
+        model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
+        messages=[
+            {"role": "system", "content": getattr(skill, "system_prompt", "")},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+def append_plan_query(query: str | list[SearchQuery], report_plan: str) -> str | list[SearchQuery]:
+    if not report_plan.strip():
+        return query
+    queries = normalize_search_queries(query)
+    queries.append(SearchQuery(name="plan_query", text=report_plan))
+    terms = " ".join(extract_keywords(report_plan)[:16])
+    if terms:
+        queries.append(SearchQuery(name="keyword_query", text=terms))
+    return queries
 
 
 def rewrite_report(

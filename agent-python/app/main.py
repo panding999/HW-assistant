@@ -14,7 +14,7 @@ from openai import APIConnectionError, APIError, OpenAI
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, SearchQuery, run_report_agent
+from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, SearchQuery, extract_keywords, run_report_agent
 from app.skill_registry import AUTO_SKILL, SKILLS, VALID_SKILLS, SkillSpec
 
 
@@ -82,6 +82,12 @@ class RoutingResult(BaseModel):
     reason: str
 
 
+class IndexedChunk(BaseModel):
+    id: str
+    document: str
+    metadata: dict[str, str | int | float | bool]
+
+
 app = FastAPI(title="FZU Homework Agent", version="0.1.0")
 
 
@@ -138,6 +144,10 @@ def collection_name(assignment_id: int) -> str:
     return f"assignment_{assignment_id}"
 
 
+def collection_metadata() -> dict[str, str]:
+    return {"hnsw:space": "cosine"}
+
+
 def read_material_text(material: MaterialRef) -> str:
     path = Path(material.path)
     if not path.exists():
@@ -146,7 +156,10 @@ def read_material_text(material: MaterialRef) -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         reader = PdfReader(str(path))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+        return "\n\n".join(
+            f"[page:{index + 1}]\n{page.extract_text() or ''}"
+            for index, page in enumerate(reader.pages)
+        )
 
     if suffix in {".md", ".markdown", ".txt"}:
         return path.read_text(encoding="utf-8", errors="ignore")
@@ -171,6 +184,122 @@ def chunk_text(text: str, chunk_size: int = 900, overlap: int = 160) -> list[str
             break
         start = max(0, end - overlap)
     return chunks
+
+
+def build_index_chunks(assignment_id: int, material: MaterialRef, text: str) -> list[IndexedChunk]:
+    sections = split_material_sections(material.filename, text)
+    document_summary = summarize_for_index(text, 700)
+    document_outline = outline_for_sections(sections)
+    key_terms = "、".join(extract_keywords(" ".join([material.filename, text]))[:18])
+    chunks: list[IndexedChunk] = []
+    for parent_index, section in enumerate(sections):
+        section_title = section["title"]
+        section_text = section["text"]
+        parent_id = f"{material.id}-p{parent_index}"
+        parent_excerpt = summarize_for_index(section_text, 1200)
+        section_summary = summarize_for_index(section_text, 420)
+        for chunk_index, chunk in enumerate(chunk_text(section_text)):
+            chunks.append(
+                IndexedChunk(
+                    id=f"{material.id}-{parent_index}-{chunk_index}",
+                    document=chunk,
+                    metadata={
+                        "assignment_id": assignment_id,
+                        "material_id": material.id,
+                        "filename": material.filename,
+                        "section_title": section_title,
+                        "parent_id": parent_id,
+                        "chunk_index": chunk_index,
+                        "parent_index": parent_index,
+                        "source_type": "child",
+                        "parent_excerpt": parent_excerpt,
+                        "document_summary": document_summary,
+                        "document_outline": document_outline,
+                        "section_summary": section_summary,
+                        "key_terms": key_terms,
+                    },
+                )
+            )
+    return chunks
+
+
+def split_material_sections(filename: str, text: str) -> list[dict[str, str]]:
+    suffix = Path(filename).suffix.lower()
+    clean = text.strip()
+    if not clean:
+        return []
+    if suffix in {".md", ".markdown"}:
+        return split_markdown_sections(clean)
+    if "[page:" in clean:
+        return split_page_sections(clean)
+    return split_paragraph_sections(clean)
+
+
+def split_markdown_sections(text: str) -> list[dict[str, str]]:
+    matches = list(re.finditer(r"^(#{1,6})\s+(.+?)\s*$", text, flags=re.MULTILINE))
+    if not matches:
+        return split_paragraph_sections(text)
+    sections: list[dict[str, str]] = []
+    preface = text[: matches[0].start()].strip()
+    if preface:
+        sections.append({"title": "文档开头", "text": preface})
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        title = match.group(2).strip()
+        body = text[start:end].strip()
+        section_text = f"{title}\n{body}".strip()
+        if section_text:
+            sections.append({"title": title, "text": section_text})
+    return sections
+
+
+def split_page_sections(text: str) -> list[dict[str, str]]:
+    parts = re.split(r"^\[page:(\d+)\]\s*$", text, flags=re.MULTILINE)
+    sections: list[dict[str, str]] = []
+    for index in range(1, len(parts), 2):
+        page = parts[index]
+        body = parts[index + 1].strip() if index + 1 < len(parts) else ""
+        if body:
+            sections.append({"title": f"第 {page} 页", "text": body})
+    return sections or split_paragraph_sections(text)
+
+
+def split_paragraph_sections(text: str) -> list[dict[str, str]]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if not paragraphs:
+        return []
+    sections: list[dict[str, str]] = []
+    buffer: list[str] = []
+    section_index = 1
+    for paragraph in paragraphs:
+        buffer.append(paragraph)
+        if sum(len(item) for item in buffer) >= 1800:
+            sections.append({"title": f"资料片段 {section_index}", "text": "\n\n".join(buffer)})
+            section_index += 1
+            buffer = []
+    if buffer:
+        sections.append({"title": f"资料片段 {section_index}", "text": "\n\n".join(buffer)})
+    return sections
+
+
+def outline_for_sections(sections: list[dict[str, str]]) -> str:
+    if not sections:
+        return ""
+    lines = []
+    for index, section in enumerate(sections[:12], start=1):
+        lines.append(f"{index}. {section['title']}：{summarize_for_index(section['text'], 120)}")
+    return "\n".join(lines)
+
+
+def summarize_for_index(text: str, max_chars: int) -> str:
+    clean = " ".join((text or "").split())
+    if len(clean) <= max_chars:
+        return clean
+    sentence_end = max(clean.rfind("。", 0, max_chars), clean.rfind(".", 0, max_chars))
+    if sentence_end > max_chars * 0.45:
+        return clean[: sentence_end + 1]
+    return clean[: max_chars - 1].rstrip() + "..."
 
 
 def embed_texts(texts: Iterable[str]) -> list[list[float]]:
@@ -450,7 +579,7 @@ def resolve_skill(payload: ReportRequest) -> tuple[SkillSpec, RoutingResult]:
     return SKILLS[DYNAMIC_PLANNER_SKILL], dynamic_result
 
 
-def build_prompt(payload: ReportRequest, skill: SkillSpec, context_text: str) -> str:
+def build_prompt(payload: ReportRequest, skill: SkillSpec, context_text: str, report_plan: str = "") -> str:
     sections = ", ".join(skill.required_sections)
     dynamic_note = ""
     if skill.id == DYNAMIC_PLANNER_SKILL:
@@ -461,6 +590,9 @@ def build_prompt(payload: ReportRequest, skill: SkillSpec, context_text: str) ->
 3. 使用检索证据填充主体内容。
 4. 输出连贯完整的最终草稿，避免未完成占位符。
 """.strip()
+
+    if report_plan.strip():
+        dynamic_note = f"{dynamic_note}\n\n动态报告计划：\n{report_plan.strip()}".strip()
 
     return f"""
 请使用所选生成策略“{skill.label}”为当前作业撰写中文 Markdown 报告。
@@ -509,6 +641,22 @@ def build_search_queries(payload: ReportRequest, skill: SkillSpec) -> list[Searc
         SearchQuery(name="assignment_query", text="\n".join(part for part in assignment_parts if part.strip())),
         SearchQuery(name="skill_query", text="\n".join(part for part in skill_parts if part.strip())),
         SearchQuery(name="section_query", text="\n".join(part for part in section_parts if part.strip())),
+        SearchQuery(
+            name="plan_query",
+            text="\n".join(
+                [
+                    f"报告结构规划：{' '.join(skill.required_sections)}",
+                    f"交付目标：{payload.description or payload.title}",
+                    f"检索重点：{skill.query_hint}",
+                ]
+            ),
+        ),
+        SearchQuery(
+            name="keyword_query",
+            text=" ".join(
+                extract_keywords(" ".join([payload.title, payload.course or "", payload.description or "", skill.query_hint]))[:20]
+            ),
+        ),
     ]
 
 
@@ -542,7 +690,7 @@ def reset_assignment_collection(assignment_id: int):
     except Exception as exc:
         if "does not exist" not in str(exc).lower() and "not found" not in str(exc).lower():
             logger.warning("collection_delete_skipped assignment_id=%s error=%s", assignment_id, exc.__class__.__name__)
-    return client.get_or_create_collection(name=name)
+    return client.get_or_create_collection(name=name, metadata=collection_metadata())
 
 
 @app.get("/health")
@@ -573,20 +721,14 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
 
     ids: list[str] = []
     documents: list[str] = []
-    metadatas: list[dict[str, str | int]] = []
+    metadatas: list[dict[str, str | int | float | bool]] = []
 
     for material in payload.materials:
         text = read_material_text(material)
-        for index, chunk in enumerate(chunk_text(text)):
-            ids.append(f"{material.id}-{index}")
-            documents.append(chunk)
-            metadatas.append(
-                {
-                    "assignment_id": payload.assignment_id,
-                    "material_id": material.id,
-                    "filename": material.filename,
-                }
-            )
+        for chunk in build_index_chunks(payload.assignment_id, material, text):
+            ids.append(chunk.id)
+            documents.append(chunk.document)
+            metadatas.append(chunk.metadata)
 
     if not documents:
         logger.info("index_done assignment_id=%s chunks=0", payload.assignment_id)
@@ -632,7 +774,8 @@ def generate_report(payload: ReportRequest) -> ReportResponse:
         payload.top_k,
     )
     collection = chroma_client().get_or_create_collection(
-        name=collection_name(payload.assignment_id)
+        name=collection_name(payload.assignment_id),
+        metadata=collection_metadata(),
     )
     skill, routing = resolve_skill(payload)
 

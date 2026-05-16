@@ -33,6 +33,35 @@ class MultiQueryCollection:
         }
 
 
+class HybridParentCollection:
+    def query(self, query_embeddings, n_results, include):
+        return {
+            "ids": [["low-keyword", "high-vector"]],
+            "documents": [["alpha beta keyword rich content", "unrelated content"]],
+            "metadatas": [[
+                {
+                    "material_id": 10,
+                    "filename": "requirements.md",
+                    "section_title": "keyword section",
+                    "parent_id": "10-p0",
+                    "parent_excerpt": "parent context with alpha beta keyword rich details",
+                    "section_summary": "section summary",
+                    "document_summary": "document summary",
+                    "document_outline": "1. keyword section",
+                    "key_terms": "alpha beta keyword",
+                },
+                {
+                    "material_id": 11,
+                    "filename": "other.md",
+                    "section_title": "other",
+                    "parent_id": "11-p0",
+                    "parent_excerpt": "other parent",
+                },
+            ]],
+            "distances": [[0.9, 0.01]],
+        }
+
+
 class FakeChoice:
     def __init__(self, content):
         self.message = type("Message", (), {"content": content})()
@@ -185,6 +214,10 @@ class FakeSkill:
     required_sections = ["实验目的", "实验步骤"]
 
 
+class FakeDynamicSkill(FakeSkill):
+    id = "dynamic_planner"
+
+
 class AgentRuntimeTests(unittest.TestCase):
     def test_quality_uses_model_scores_and_local_signals(self) -> None:
         quality = evaluate_quality(
@@ -246,6 +279,37 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertLessEqual(len(result.evidence), 3)
         self.assertEqual(len({item.chunk_id for item in result.evidence}), len(result.evidence))
         self.assertEqual(result.evidence[0].chunk_id, "10-1")
+
+    def test_hybrid_search_prefers_keyword_match_and_returns_parent_context(self) -> None:
+        result = search_materials(
+            HybridParentCollection(),
+            [SearchQuery(name="keyword_query", text="alpha beta keyword")],
+            top_k=2,
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+        )
+        self.assertEqual(result.parent_merged_hits, 2)
+        self.assertEqual(result.evidence[0].chunk_id, "low-keyword")
+        self.assertEqual(result.evidence[0].parent_id, "10-p0")
+        self.assertEqual(result.evidence[0].section_title, "keyword section")
+        self.assertGreater(result.evidence[0].keyword_score, result.evidence[1].keyword_score)
+        self.assertIn("parent context", result.evidence[0].excerpt)
+
+    def test_dynamic_planner_adds_plan_step_before_retrieval(self) -> None:
+        client = FakeClient()
+        result = run_report_agent(
+            payload=FakePayload(),
+            skill=FakeDynamicSkill(),
+            collection=FakeCollection(),
+            query=[SearchQuery(name="assignment_query", text="open task")],
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+            llm_client=lambda: client,
+            build_prompt=lambda payload, skill, context, plan="": f"{plan}\n{context}",
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+        self.assertEqual(result.agent_trace[0].tool_name, "plan_report_outline")
+        self.assertEqual(result.agent_trace[1].tool_name, "search_materials")
+        self.assertIn("plan", result.agent_trace[0].details)
 
     def test_agent_loop_keeps_original_when_rewrite_scores_lower(self) -> None:
         client = WorseRewriteClient()

@@ -1,16 +1,20 @@
 # FZU Homework Assistant
 
-面向福州大学课程作业场景的 AI 作业资料工作台。项目把“上传资料、检索证据、生成报告、质量审稿、保存草稿、数据监控”串成一条可观测的 Agent 工作流，适合作为后端开发 / 大模型应用方向的简历项目展示。
+面向课程作业场景的 AI 作业资料工作台。项目把“上传资料、任务类型识别、作业级 RAG 检索、报告生成、质量审稿、自动改写、报告保存、数据监控”串成一条可观测的 Agent 工作流，适合作为后端开发 / 大模型应用方向的简历项目展示。
+
+![课程作业 RAG + Agent 工作流](docs/assets/workflow-overview.png)
 
 ## 项目亮点
 
-- **自研 ReAct-lite Agent Loop**：Python Agent 按固定上限执行检索、生成、质量检测、自动改写等工具步骤，避免无限循环，并输出完整 `agent_trace`。
-- **RAG 作业资料生成**：上传 PDF / Markdown / TXT 资料后，Agent 自动解析、切分、向量化到 ChromaDB，并基于检索片段生成 Markdown 报告草稿。
-- **Skill Routing + Dynamic Planner**：支持实验报告、论文总结、课程问答等固定 skill；智能识别低置信度时进入动态规划 skill，先规划报告结构再生成内容。
-- **模型质量门控**：使用模型对草稿进行多维审稿，输出结构完整度、资料依据、具体程度、可提交程度、风险分和总分；低于阈值时自动改写一次，仍未达标则标记为“需人工审核修改”。
-- **端到端可观测性**：Java 后端保存路由结果、检索证据、质量指标和 Agent Trace；前端展示 AI 工作流程，监控页展示成功率、P95 耗时、改写率、阶段耗时和最近任务。
-- **真实数据评测闭环**：支持从真实任务数据导出 JSONL，计算 Skill Routing Accuracy、Recall@k、MRR、章节完整率、证据覆盖率、改写触发率等指标。
-- **Docker 一键启动**：前端、后端、Agent、MySQL、Redis、ChromaDB 通过 `docker compose` 编排，方便本地演示。
+- **Assignment-scoped RAG**：每个作业使用独立 ChromaDB collection，命名为 `assignment_{id}`，生成报告时只检索当前作业上传的资料，避免不同课程、不同作业之间的资料污染。
+- **结构化索引与混合召回**：支持 PDF / Markdown / TXT 资料解析，按 Markdown 标题、PDF 页、段落块进行结构化切分，并写入 `section_title`、`parent_id`、全文摘要、章节摘要、关键词等 metadata。
+- **Cosine 向量检索 + Hybrid Score**：ChromaDB collection 显式使用 `hnsw:space=cosine`；检索时先向量召回候选，再结合关键词命中、章节匹配、文件名匹配做轻量重排。
+- **Multi-Query Retrieval + Parent-Child Retrieval**：从作业描述、Skill、章节、报告计划、关键词 5 路构造 query；用 child chunk 精准命中，用 parent/section 上下文补足生成所需背景。
+- **Skill Routing + Dynamic Planner**：支持实验报告、论文总结、课程问答等固定业务 Skill；低置信度任务进入 `dynamic_planner`，先生成报告大纲 / 章节计划，再基于计划检索和生成正文。
+- **ReAct-lite Agent Loop**：Python Agent 按固定上限执行 `plan`、`retrieve`、`generate`、`quality`、`rewrite` 等步骤，避免无限循环，并输出完整 `agent_trace`。
+- **模型质量门控**：从结构完整度、证据贴合度、具体性、可提交性、低风险五个维度审稿；低于阈值时自动改写一次，并保留评分更高版本。
+- **端到端可观测性**：Java 后端保存路由结果、检索证据、质量指标和 Agent Trace；前端展示 SSE 阶段日志、Agent Trace、RAG Evidence 和监控指标。
+- **Docker 一键启动**：前端、后端、Agent、MySQL、Redis、ChromaDB 通过 `docker compose` 编排，方便本地演示和 GitHub 复现。
 
 ## 系统架构
 
@@ -22,7 +26,7 @@ Spring Boot Backend
   |  任务编排 / SSE 日志 / 报告版本 / MySQL 持久化 / Redis 预留
   v
 FastAPI Python Agent
-  |  Skill Routing / RAG / ReAct-lite Loop / 质量审稿 / 自动改写
+  |  Skill Routing / Assignment-scoped RAG / Agent Loop / 质量审稿 / 自动改写
   v
 ChromaDB + DeepSeek OpenAI-compatible API + DashScope Embedding
 ```
@@ -30,41 +34,37 @@ ChromaDB + DeepSeek OpenAI-compatible API + DashScope Embedding
 数据存储：
 
 - **MySQL**：作业、资料、报告、Agent 任务、任务日志、检索证据、质量指标、Trace。
-- **ChromaDB**：资料切分后的向量检索库。
+- **ChromaDB**：按作业隔离的向量 collection，使用 cosine space。
 - **Redis**：已接入后端依赖，当前预留给运行中任务状态、最近访问上下文和 SSE 重连恢复。
-
-## 技术栈
-
-| 模块 | 技术 |
-| --- | --- |
-| Frontend | Next.js 14, React 18, TypeScript, Tailwind CSS, lucide-react |
-| Backend | Spring Boot 3, Java 21, MyBatis Plus, MySQL, Redis, SSE, SLF4J |
-| Agent | FastAPI, Pydantic, OpenAI-compatible SDK, ChromaDB, pypdf |
-| LLM Provider | DeepSeek OpenAI-compatible API, DashScope Embedding |
-| DevOps | Docker Compose |
 
 ## 核心流程
 
-1. 学生创建作业，填写课程、标题、截止时间、任务说明。
-2. 上传课程资料、论文、实验要求或项目文档。
-3. 后端创建异步生成任务，并通过 SSE 推送执行日志。
-4. Python Agent 解析资料，写入 ChromaDB。
-5. Agent 执行 Skill Routing：
-   - 手动选择：直接进入指定 skill。
-   - 智能识别：规则优先，必要时 LLM 分类。
-   - 低置信度：进入 `dynamic_planner`。
-6. Agent 检索相关资料片段，生成 Markdown 初稿。
-7. 模型质量审稿器返回多维评分、问题列表和改写重点。
-8. 若未达阈值，Agent 自动改写一次。
-9. Java 后端保存最终草稿、检索证据、质量指标和 Trace。
-10. 前端展示报告草稿、AI 工作流程和数据监控指标。
+1. 用户创建作业，填写课程、标题、截止时间和任务说明。
+2. 用户上传 PDF / Markdown / TXT 资料。
+3. Java 后端创建异步 `AgentTask`，并通过 SSE 推送阶段日志。
+4. 后端调用 Python Agent `/agent/index`。
+5. Agent 删除并重建当前作业的 `assignment_{id}` collection。
+6. Agent 解析资料，结构化切分 chunk，生成全文摘要、章节摘要和关键词，并写入 ChromaDB。
+7. 后端调用 `/agent/generate-report`，Agent 执行 Skill Routing。
+8. 如果进入 `dynamic_planner`，Agent 先生成报告大纲 / 章节计划。
+9. Agent 构造多路 query，执行 cosine 向量召回、父子上下文合并和 hybrid score 重排。
+10. Agent 基于全局摘要、章节摘要和 Top-K 原文证据生成 Markdown 草稿。
+11. 质量门控审稿，必要时自动改写一次，并保留更好版本。
+12. Java 后端保存报告、retrieved evidence、quality metrics 和 agent trace。
+13. 前端展示报告草稿、AI 工作流、RAG evidence 和数据监控指标。
 
 ## Agent Loop
 
-当前 Agent loop 默认最多执行 4 个关键步骤：
+普通固定 Skill 的主要步骤：
 
 ```text
 search_materials -> build_report_draft -> check_report_quality -> rewrite_report(optional)
+```
+
+`dynamic_planner` 会额外增加规划步骤：
+
+```text
+plan_report_outline -> search_materials -> build_report_draft -> check_report_quality -> rewrite_report(optional)
 ```
 
 每一步都会记录：
@@ -76,6 +76,7 @@ search_materials -> build_report_draft -> check_report_quality -> rewrite_report
 - `output_summary`
 - `status`
 - `duration_ms`
+- `details`
 
 质量审稿返回：
 
@@ -87,21 +88,102 @@ search_materials -> build_report_draft -> check_report_quality -> rewrite_report
 - `total_score`
 - `decision`: `PASS` / `NEEDS_REWRITE` / `NEEDS_USER_INPUT`
 
-前端会把状态翻译成面向学生的中文标签，例如“需人工审核修改”“需补充资料”。
+## RAG 设计
 
-## 页面功能
+本项目不是通用知识库 RAG，而是 **Assignment-scoped RAG / 任务级临时资料库 RAG**。
 
-- **作业资料工作台**：创建作业、选择作业、上传资料、生成报告。
-- **AI 工作流程**：展示 Skill 路由、资料解析、RAG 检索、报告生成、质量检查、自动改写、完成状态。
-- **报告草稿**：支持预览、编辑、保存、导出 Markdown。
-- **弹窗式作业队列**：从顶部统计卡片进入任务列表，切换当前展示作业。
-- **数据监控页**：展示 Agent Loop / RAG / Skill Routing 的运行画像，包括：
-  - 任务总数、成功率、平均耗时、P95 耗时
-  - 动态规划兜底率、自动改写率
-  - 阶段平均耗时
-  - Skill 命中分布
-  - 最近任务
-  - 资料与报告资产统计
+```text
+assignment_1 -> collection: assignment_1
+assignment_2 -> collection: assignment_2
+assignment_3 -> collection: assignment_3
+```
+
+生成某个作业报告时，只会打开当前作业的 collection。重新生成报告时，会先删除并重建当前作业 collection，因此索引总是和本次上传资料保持一致。
+
+检索链路：
+
+```text
+全文摘要 + 章节摘要 + key terms
+  +
+5 路 query:
+  assignment_query
+  skill_query
+  section_query
+  plan_query
+  keyword_query
+  ↓
+ChromaDB cosine vector search
+  ↓
+Parent-Child 上下文合并
+  ↓
+Hybrid Score = vector score + keyword / section / filename signals
+  ↓
+Top-K 原文证据进入报告生成 prompt
+```
+
+`retrieved_evidence` 会包含：
+
+- `chunk_id`
+- `material_id`
+- `filename`
+- `parent_id`
+- `section_title`
+- `vector_score`
+- `keyword_score`
+- `hybrid_score`
+- `excerpt`
+
+## Skill 机制
+
+项目实现的是**自研业务 Skill Registry**，不是 Codex/Claude 标准工具型 Skill 包。
+
+每个业务 Skill 位于：
+
+```text
+agent-python/app/skills/{skill_id}/
+  skill.json
+  SKILL.md
+```
+
+`skill.json` 定义机器可读元数据：
+
+- `id`
+- `label`
+- `description`
+- `entry`
+- `system_prompt`
+- `query_hint`
+- `required_sections`
+- `output_requirements`
+
+`SKILL.md` 定义该作业类型的详细生成规范。Agent 会根据路由结果加载对应 Skill，把 `system_prompt` 作为 system message，并把 `SKILL.md` 内容拼入生成 prompt。
+
+当前内置 Skill：
+
+- `lab_report`：实验报告、编程实践、算法实现。
+- `paper_summary`：论文阅读、文献总结、课堂汇报。
+- `course_qa_report`：课程资料问答、讲解、汇报总结。
+- `dynamic_planner`：开放型任务，先规划报告结构再生成内容。
+
+## Prompt 位置
+
+- Skill system prompt：`agent-python/app/skills/*/skill.json`
+- Skill 详细说明：`agent-python/app/skills/*/SKILL.md`
+- 报告生成 prompt：`agent-python/app/main.py` 的 `build_prompt`
+- Skill 路由 prompt：`agent-python/app/main.py` 的 `route_skill_with_llm`
+- Planner prompt：`agent-python/app/agent_runtime.py` 的 `plan_report_outline`
+- 改写 prompt：`agent-python/app/agent_runtime.py` 的 `rewrite_report`
+- 质量审稿 prompt：`agent-python/app/agent_runtime.py` 的 `review_quality_with_llm`
+
+## 技术栈
+
+| 模块 | 技术 |
+| --- | --- |
+| Frontend | Next.js 14, React 18, TypeScript, Tailwind CSS, lucide-react |
+| Backend | Spring Boot 3, Java 21, MyBatis Plus, MySQL, Redis, SSE, SLF4J |
+| Agent | FastAPI, Pydantic, OpenAI-compatible SDK, ChromaDB, pypdf |
+| LLM Provider | DeepSeek OpenAI-compatible API, DashScope Embedding |
+| DevOps | Docker Compose |
 
 ## 快速启动
 
@@ -124,7 +206,7 @@ DASHSCOPE_API_KEY=your_dashscope_api_key
 QUALITY_PASS_SCORE=0.70
 ```
 
-> 真实密钥只放本地 `.env`，不要提交到 GitHub。
+真实密钥只放本地 `.env`，不要提交到 GitHub。
 
 ### 2. 启动服务
 
@@ -140,16 +222,6 @@ docker compose up --build
 - ChromaDB: http://localhost:8001
 
 Docker 网络内 Agent 访问 ChromaDB 使用容器端口 `8000`；宿主机本地开发默认访问映射端口 `8001`。
-
-### 3. 基本使用
-
-1. 打开 `http://localhost:3000`。
-2. 点击“新建”创建作业。
-3. 上传资料。
-4. 点击“生成当前报告草稿”。
-5. 在 AI 工作流程中观察路由、检索、质量检测和改写过程。
-6. 在报告草稿区域继续编辑和保存。
-7. 进入数据监控页查看真实任务指标。
 
 ## 常用命令
 
@@ -201,6 +273,7 @@ Backend：
 - `DELETE /api/materials/{id}`
 - `POST /api/assignments/{id}/generate`
 - `GET /api/assignments/{id}/tasks`
+- `GET /api/tasks/{taskId}`
 - `POST /api/tasks/{taskId}/retry`
 - `GET /api/tasks/{taskId}/events`
 - `GET /api/monitoring/overview`
@@ -233,12 +306,7 @@ cd agent-python
 python evals/eval_harness.py evals/sample_results.jsonl --k 5
 ```
 
-从真实任务数据导出 JSONL 后再评测：
-
-```bash
-python evals/export_task_results.py tasks.json evals/task_results.jsonl
-python evals/eval_harness.py evals/task_results.jsonl --k 5
-```
+如果要测 `Hit Rate@5` / `Recall@5`，需要准备小规模人工标注的 gold 集，例如 `gold_chunk_ids`、`gold_sections` 或 `gold_materials`。建议先做 20-50 条，用当前检索 top-10/top-20 辅助人工标注即可。
 
 ## 项目结构
 
@@ -253,14 +321,18 @@ python evals/eval_harness.py evals/task_results.jsonl --k 5
 │   │   └── skills/
 │   ├── evals/
 │   └── tests/
+├── docs/
+│   └── assets/
+│       └── workflow-overview.png
 ├── docker-compose.yml
+├── AGENTS.md
 ├── ROADMAP.md
 └── README.md
 ```
 
 ## 适合写进简历的描述
 
-> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding 和 ChromaDB，实现资料解析、RAG 检索、任务类型识别、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计。
+> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding 和 ChromaDB，实现作业级隔离 RAG、结构化资料索引、Multi-Query Retrieval、Parent-Child Retrieval、Hybrid Score 轻量重排、Skill Routing、动态报告规划、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计。
 
 ## 安全说明
 
