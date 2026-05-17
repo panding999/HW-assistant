@@ -297,6 +297,33 @@ Invoke-RestMethod http://localhost:8080/api/monitoring/overview
 - 这是当前项目最像 Agent 产品的地方。
 - 也能解释为什么低分草稿仍保存：保存的是可编辑草稿，不代表质量通过。
 
+### P0.5：降低单 Agent 自评虚高
+
+当前质量门控属于 **Planner-Generator-Evaluator inspired single-agent harness**：生成、评审和改写都在同一个 Agent Runtime 内完成。它适合作为简历项目里的自动质量门控，但不要把它描述成严格客观评测。后续如果继续增强，优先做三件事：
+
+1. **Evaluator 换成不同模型或不同 prompt 角色**
+
+   例如 Generator 使用 DeepSeek，Evaluator 使用另一个模型，或者至少使用更严格的审稿 system prompt，降低同源偏差。
+
+2. **给总分加硬性上限**
+
+   当前总分由结构、证据、具体性、可提交性、低风险五个维度加权得到。后续可以加入硬规则，避免模型自评虚高：
+
+   ```text
+   citation_coverage < 0.4 时，total_score 最高只能 0.65
+   retrieved_chunks = 0 时，不能 PASS
+   section_completeness < 1.0 时，不能 PASS
+   ```
+
+3. **做一个小型人工标注 eval set**
+
+   不用很多，20-50 条就足够支撑简历项目展示。用于测 `Hit Rate@5`、`Recall@5`、`Section Completeness`、人工可接受率，并和线上 `quality_metrics_json` 对照。
+
+推荐理由：
+
+- 这能把“模型自己评自己”的风险讲清楚，也能展示工程上如何用本地规则、人工 gold set 和模型审稿组合成更可靠的评测闭环。
+- 对简历项目来说，这比引入真正多 Agent 或 LangGraph 更划算，工作量可控，展示价值高。
+
 ### P1：Eval 数据闭环
 
 当前监控页已有运行指标，但 Recall@k / MRR 还需要真实标注。

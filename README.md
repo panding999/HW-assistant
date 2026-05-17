@@ -88,6 +88,8 @@ plan_report_outline -> search_materials -> build_report_draft -> check_report_qu
 - `total_score`
 - `decision`: `PASS` / `NEEDS_REWRITE` / `NEEDS_USER_INPUT`
 
+质量门控采用五维加权：结构完整性 `25%`、证据贴合度 `25%`、内容具体性 `20%`、可提交性 `15%`、低风险 `15%`。其中低风险在代码中由 `(1 - risk_score)` 计入总分。该模块定位是自动质量门控，不是完全客观的最终评测；项目通过章节完整率、引用覆盖率、检索证据数量和占位符检测等本地信号，缓解单 Agent 自评可能偏高的问题。
+
 ## RAG 设计
 
 本项目不是通用知识库 RAG，而是 **Assignment-scoped RAG / 任务级临时资料库 RAG**。
@@ -306,7 +308,7 @@ cd agent-python
 python evals/eval_harness.py evals/sample_results.jsonl --k 5
 ```
 
-如果要测 `Hit Rate@5` / `Recall@5`，需要准备小规模人工标注的 gold 集，例如 `gold_chunk_ids`、`gold_sections` 或 `gold_materials`。建议先做 20-50 条，用当前检索 top-10/top-20 辅助人工标注即可。
+如果要测 `Hit Rate@5` / `Recall@5`，需要准备小规模人工标注的 gold 集，例如 `gold_chunk_ids`、`gold_sections` 或 `gold_materials`。建议先做 20-50 条，用当前检索 top-10/top-20 辅助人工标注即可。后续增强可以把 `citation_coverage < 0.4`、`retrieved_chunks = 0`、`section_completeness < 1.0` 等情况做成硬性上限或直接禁止 `PASS`，减少模型自评虚高。
 
 ## 项目结构
 
