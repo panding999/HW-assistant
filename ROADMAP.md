@@ -272,11 +272,11 @@ Invoke-RestMethod http://localhost:8000/health
 Invoke-RestMethod http://localhost:8080/api/monitoring/overview
 ```
 
-## 下次优先开发建议
+## 最近完成
 
-### P0：把“质量门控”做得更产品化
+### 质量门控产品化
 
-当前已能评分和标记 `NEEDS_REWRITE`，下一步建议：
+已完成：
 
 - 前端在报告草稿顶部显示质量结果卡片：
   - 总分
@@ -285,48 +285,38 @@ Invoke-RestMethod http://localhost:8080/api/monitoring/overview
   - 模型评价摘要
   - 问题列表 `issues`
   - 改写建议 `rewrite_focus`
-- 对 `NEEDS_REWRITE` 提供按钮：
-  - “再次优化草稿”
-  - “标记为已人工审核”
-- 后端新增再次优化接口：
-  - `POST /api/tasks/{taskId}/rewrite`
-  - 或 `POST /api/assignments/{id}/improve-report`
+- 提供“再次优化”入口：先保存当前草稿，再结合原草稿与最新资料生成新草稿。
+- 后端新增再次优化接口：`POST /api/assignments/{id}/improve-report`。
+- 新草稿会重新进入质量门控；如果评分更低，保留原稿并向用户说明原因。
 
-推荐理由：
+设计口径：
 
-- 这是当前项目最像 Agent 产品的地方。
-- 也能解释为什么低分草稿仍保存：保存的是可编辑草稿，不代表质量通过。
+- 低分草稿仍可以保存，因为保存的是“可编辑草稿”，不代表质量通过或最终可直接提交。
+- 不做“人工审核标记”，避免引入和当前产品价值不强相关的入口。
 
-### P0.5：降低单 Agent 自评虚高
+### 独立审稿模型
 
-当前质量门控属于 **Planner-Generator-Evaluator inspired single-agent harness**：生成、评审和改写都在同一个 Agent Runtime 内完成。它适合作为简历项目里的自动质量门控，但不要把它描述成严格客观评测。后续如果继续增强，优先做三件事：
+已完成：
 
-1. **Evaluator 换成不同模型或不同 prompt 角色**
+- 质量审稿从生成模型链路里解耦，支持独立 evaluator client。
+- 配置入口为 `EVALUATOR_BASE_URL`、`EVALUATOR_MODEL`、`EVALUATOR_API_KEY`。
+- 未配置时回退默认生成模型，保证本地演示稳定。
+- `QualityMetrics` 增加 evaluator 来源字段，前端质量卡片显示“独立审稿模型评分”或“默认审稿器评分”。
+- `QUALITY_PASS_SCORE=0.70` 的语义固定为“合格可编辑初稿”通过线，不表示最终可直接提交。
 
-   例如 Generator 使用 DeepSeek，Evaluator 使用另一个模型，或者至少使用更严格的审稿 system prompt，降低同源偏差。
+设计口径：
 
-2. **给总分加硬性上限**
+- 这是自动质量门控，不是严格客观评测。
+- 重点降低“生成器自己评自己”的同源偏差。
+- evaluator prompt 判断的是“是否是高质量、可继续编辑的初稿”，不是“是否最终可直接提交”。
 
-   当前总分由结构、证据、具体性、可提交性、低风险五个维度加权得到。后续可以加入硬规则，避免模型自评虚高：
-
-   ```text
-   citation_coverage < 0.4 时，total_score 最高只能 0.65
-   retrieved_chunks = 0 时，不能 PASS
-   section_completeness < 1.0 时，不能 PASS
-   ```
-
-3. **做一个小型人工标注 eval set**
-
-   不用很多，20-50 条就足够支撑简历项目展示。用于测 `Hit Rate@5`、`Recall@5`、`Section Completeness`、人工可接受率，并和线上 `quality_metrics_json` 对照。
-
-推荐理由：
-
-- 这能把“模型自己评自己”的风险讲清楚，也能展示工程上如何用本地规则、人工 gold set 和模型审稿组合成更可靠的评测闭环。
-- 对简历项目来说，这比引入真正多 Agent 或 LangGraph 更划算，工作量可控，展示价值高。
+## 下次优先开发建议
 
 ### P1：Eval 数据闭环
 
 当前监控页已有运行指标，但 Recall@k / MRR 还需要真实标注。
+
+建议先做 20-50 条小型人工标注集，用于测 `Hit Rate@5`、`Recall@5`、`Section Completeness`、人工可接受率，并和线上 `quality_metrics_json` 对照。
 
 下一步建议：
 
@@ -490,7 +480,7 @@ feat: add observable homework agent workflow
 
 可以直接对 Codex 说：
 
-> 继续完善 HW Assistant，先读 ROADMAP.md 和 README.md。优先做 P0：质量门控产品化，把总分、问题列表、改写建议展示到报告区域，并增加再次优化草稿入口。
+> 继续完善 HW Assistant，先读 ROADMAP.md 和 README.md。当前质量卡片、再次优化和独立审稿模型已经完成，优先做 Eval 数据闭环或基于质量问题的二次检索。
 
 或者：
 

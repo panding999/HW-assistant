@@ -2,10 +2,11 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.agent_runtime import QualityMetrics, RetrievedEvidence, SearchQuery, calculate_citation_coverage, decide_quality, evaluate_quality, manual_review_reason_for, model_quality_score, quality_pass_score, run_report_agent, search_materials, should_rewrite
+from app.agent_runtime import QualityMetrics, RetrievedEvidence, SearchQuery, calculate_citation_coverage, decide_quality, evaluate_quality, improve_report_agent, manual_review_reason_for, model_quality_score, quality_pass_score, run_report_agent, search_materials, should_rewrite
 
 
 class FakeCollection:
@@ -203,6 +204,169 @@ class WorseRewriteClient:
         self.chat = WorseRewriteChat()
 
 
+class WorseImproveCompletions:
+    def __init__(self):
+        self.quality_calls = 0
+
+    def create(self, **kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        if '"scores"' in prompt and "质量审稿器" in prompt:
+            self.quality_calls += 1
+            if self.quality_calls == 1:
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "scores": {
+                                "structure": 1.0,
+                                "grounding": 0.9,
+                                "specificity": 0.8,
+                                "readiness": 0.8,
+                                "risk": 0.1,
+                            },
+                            "review_summary": "当前用户草稿质量较好。",
+                            "issues": [],
+                            "rewrite_focus": [],
+                            "decision_hint": "PASS",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "scores": {
+                            "structure": 1.0,
+                            "grounding": 0.4,
+                            "specificity": 0.35,
+                            "readiness": 0.35,
+                            "risk": 0.65,
+                        },
+                        "review_summary": "候选优化稿质量下降。",
+                        "issues": ["证据变弱"],
+                        "rewrite_focus": ["保留用户草稿依据"],
+                        "decision_hint": "NEEDS_REWRITE",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        if "基于当前草稿继续优化" in prompt:
+            return FakeResponse("# 实验目的\n候选稿缺少依据。\n\n# 实验步骤\n候选稿不完整。")
+        return FakeResponse("unused")
+
+
+class WorseImproveChat:
+    def __init__(self):
+        self.completions = WorseImproveCompletions()
+
+
+class WorseImproveClient:
+    def __init__(self):
+        self.chat = WorseImproveChat()
+
+
+class BetterImproveCompletions:
+    def __init__(self):
+        self.quality_calls = 0
+
+    def create(self, **kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        if '"scores"' in prompt and "质量审稿器" in prompt:
+            self.quality_calls += 1
+            if self.quality_calls == 1:
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "scores": {
+                                "structure": 1.0,
+                                "grounding": 0.55,
+                                "specificity": 0.45,
+                                "readiness": 0.45,
+                                "risk": 0.45,
+                            },
+                            "review_summary": "当前用户草稿仍可增强。",
+                            "issues": ["步骤偏粗"],
+                            "rewrite_focus": ["补充资料依据"],
+                            "decision_hint": "NEEDS_REWRITE",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "scores": {
+                            "structure": 1.0,
+                            "grounding": 0.9,
+                            "specificity": 0.9,
+                            "readiness": 0.88,
+                            "risk": 0.08,
+                        },
+                        "review_summary": "候选优化稿质量更高。",
+                        "issues": [],
+                        "rewrite_focus": [],
+                        "decision_hint": "PASS",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        if "基于当前草稿继续优化" in prompt:
+            return FakeResponse(
+                "# 实验目的\n优化后补充了资料依据。[来源: 实验要求.md]\n\n"
+                "# 实验步骤\n优化后步骤更完整。[来源: 实验要求.md]"
+            )
+        return FakeResponse("unused")
+
+
+class BetterImproveChat:
+    def __init__(self):
+        self.completions = BetterImproveCompletions()
+
+
+class BetterImproveClient:
+    def __init__(self):
+        self.chat = BetterImproveChat()
+
+
+class RecordingCompletions:
+    def __init__(self, label):
+        self.label = label
+        self.calls = []
+
+    def create(self, **kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        self.calls.append({"model": kwargs.get("model"), "prompt": prompt, "label": self.label})
+        if '"scores"' in prompt and "质量审稿器" in prompt:
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "scores": {
+                            "structure": 1.0,
+                            "grounding": 0.9,
+                            "specificity": 0.9,
+                            "readiness": 0.86,
+                            "risk": 0.08,
+                        },
+                        "review_summary": "独立审稿器认为该草稿可以作为高质量初稿继续编辑。",
+                        "issues": [],
+                        "rewrite_focus": [],
+                        "decision_hint": "PASS",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return FakeResponse("# 实验目的\n生成稿。[来源: 实验要求.md]\n\n# 实验步骤\n生成稿。[来源: 实验要求.md]")
+
+
+class RecordingChat:
+    def __init__(self, completions):
+        self.completions = completions
+
+
+class RecordingClient:
+    def __init__(self, completions):
+        self.chat = RecordingChat(completions)
+
+
 class FakePayload:
     assignment_id = 1
     top_k = 3
@@ -240,6 +404,53 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertGreater(quality.total_score, 0)
         self.assertIn(quality.decision, {"PASS", "NEEDS_REWRITE"})
         self.assertEqual(quality.retrieved_chunks, 1)
+
+    def test_agent_loop_uses_independent_evaluator_client_for_quality(self) -> None:
+        generator_calls = RecordingCompletions("generator")
+        evaluator_calls = RecordingCompletions("evaluator")
+        with patch.dict("os.environ", {"LLM_MODEL": "generator-model"}, clear=False):
+            result = run_report_agent(
+                payload=FakePayload(),
+                skill=FakeSkill(),
+                collection=FakeCollection(),
+                query="query",
+                embed_texts=lambda texts: [[0.1, 0.2]],
+                llm_client=lambda: RecordingClient(generator_calls),
+                quality_llm_client=lambda: RecordingClient(evaluator_calls),
+                evaluator_model="evaluator-model",
+                evaluator_mode="independent",
+                build_prompt=lambda payload, skill, context: context,
+                normalize_markdown=lambda text: text.strip(),
+                logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+            )
+
+        self.assertEqual(generator_calls.calls[0]["model"], "generator-model")
+        self.assertEqual(evaluator_calls.calls[0]["model"], "evaluator-model")
+        self.assertEqual(result.quality.evaluator_model, "evaluator-model")
+        self.assertEqual(result.quality.evaluator_mode, "independent")
+
+    def test_quality_marks_default_evaluator_fallback_mode(self) -> None:
+        quality = evaluate_quality(
+            "# 实验目的\n内容。[来源: 实验要求.md]\n\n# 实验步骤\n内容。[来源: 实验要求.md]",
+            ["实验目的", "实验步骤"],
+            [
+                RetrievedEvidence(
+                    chunk_id="10-0",
+                    material_id=10,
+                    filename="实验要求.md",
+                    excerpt="实验要求",
+                )
+            ],
+            rewrite_triggered=False,
+            llm_client=lambda: FakeClient(),
+            skill=FakeSkill(),
+            payload=FakePayload(),
+            evaluator_model="deepseek-v4-flash",
+            evaluator_mode="fallback",
+        )
+
+        self.assertEqual(quality.evaluator_model, "deepseek-v4-flash")
+        self.assertEqual(quality.evaluator_mode, "fallback")
 
     def test_agent_loop_returns_evidence_quality_and_trace(self) -> None:
         client = FakeClient()
@@ -329,6 +540,46 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertTrue(result.quality.rewrite_triggered)
         self.assertIn("已保留初稿", result.draft_version_reason)
         self.assertIn("accepted_rewrite=false", result.agent_trace[-1].output_summary)
+
+    def test_improve_report_keeps_current_draft_when_candidate_scores_lower(self) -> None:
+        client = WorseImproveClient()
+        current_markdown = (
+            "# 实验目的\n用户已补充完整依据。[来源: 实验要求.md]\n\n"
+            "# 实验步骤\n用户已写清楚步骤。[来源: 实验要求.md]"
+        )
+        result = improve_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=FakeCollection(),
+            query="query",
+            current_markdown=current_markdown,
+            embed_texts=lambda texts: [[0.1, 0.2]],
+            llm_client=lambda: client,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+
+        self.assertEqual(result.markdown, current_markdown)
+        self.assertIn("未采纳", result.draft_version_reason)
+        self.assertIn("accepted_improvement=false", result.agent_trace[-1].output_summary)
+
+    def test_improve_report_accepts_candidate_when_score_is_higher(self) -> None:
+        client = BetterImproveClient()
+        result = improve_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=FakeCollection(),
+            query="query",
+            current_markdown="# 实验目的\n当前较粗。[来源: 实验要求.md]\n\n# 实验步骤\n当前较粗。",
+            embed_texts=lambda texts: [[0.1, 0.2]],
+            llm_client=lambda: client,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+
+        self.assertIn("优化后补充了资料依据", result.markdown)
+        self.assertIn("已采纳", result.draft_version_reason)
+        self.assertIn("accepted_improvement=true", result.agent_trace[-1].output_summary)
 
     def test_should_rewrite_weak_draft_with_fallback_quality(self) -> None:
         quality = evaluate_quality(

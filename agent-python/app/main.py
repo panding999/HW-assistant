@@ -14,7 +14,7 @@ from openai import APIConnectionError, APIError, OpenAI
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
-from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, SearchQuery, extract_keywords, run_report_agent
+from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, SearchQuery, extract_keywords, improve_report_agent, run_report_agent
 from app.skill_registry import AUTO_SKILL, SKILLS, VALID_SKILLS, SkillSpec
 
 
@@ -59,6 +59,10 @@ class ReportRequest(BaseModel):
     description: str | None = None
     skill_id: str | None = Field(default=AUTO_SKILL)
     top_k: int = Field(default=8, ge=1, le=20)
+
+
+class ImproveReportRequest(ReportRequest):
+    current_markdown: str = Field(min_length=1)
 
 
 class ReportResponse(BaseModel):
@@ -120,6 +124,31 @@ def llm_client() -> OpenAI:
     return OpenAI(
         **kwargs,
     )
+
+
+def evaluator_model() -> str:
+    return os.getenv("EVALUATOR_MODEL") or os.getenv("LLM_MODEL", "deepseek-v4-flash")
+
+
+def evaluator_mode() -> str:
+    configured = any(
+        os.getenv(name)
+        for name in ("EVALUATOR_MODEL", "EVALUATOR_BASE_URL", "EVALUATOR_API_KEY")
+    )
+    return "independent" if configured else "fallback"
+
+
+def evaluator_client() -> OpenAI:
+    provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
+    default_base_url = {
+        "deepseek": "https://api.deepseek.com",
+        "openai": None,
+    }.get(provider, "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    base_url = os.getenv("EVALUATOR_BASE_URL") or os.getenv("LLM_BASE_URL") or default_base_url
+    kwargs = {"api_key": os.getenv("EVALUATOR_API_KEY") or get_api_key()}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
 
 
 def embedding_client() -> OpenAI:
@@ -787,6 +816,9 @@ def generate_report(payload: ReportRequest) -> ReportResponse:
         query=queries,
         embed_texts=embed_texts,
         llm_client=llm_client,
+        quality_llm_client=evaluator_client,
+        evaluator_model=evaluator_model(),
+        evaluator_mode=evaluator_mode(),
         build_prompt=build_prompt,
         normalize_markdown=normalize_markdown,
         logger=logger,
@@ -797,6 +829,59 @@ def generate_report(payload: ReportRequest) -> ReportResponse:
         skill.id,
         len(run.retrieved_evidence),
         run.quality.rewrite_triggered,
+    )
+    return ReportResponse(
+        assignment_id=payload.assignment_id,
+        markdown=run.markdown.strip(),
+        retrieved_chunks=len(run.retrieved_evidence),
+        resolved_skill_id=skill.id,
+        routing_mode=routing.mode,
+        routing_confidence=routing.confidence,
+        routing_reason=routing.reason,
+        retrieved_evidence=run.retrieved_evidence,
+        quality=run.quality,
+        agent_trace=run.agent_trace,
+        draft_version_reason=run.draft_version_reason,
+    )
+
+
+@app.post("/agent/improve-report", response_model=ReportResponse)
+def improve_report(payload: ImproveReportRequest) -> ReportResponse:
+    logger.info(
+        "improve_start assignment_id=%s requested_skill=%s top_k=%s current_chars=%s",
+        payload.assignment_id,
+        payload.skill_id,
+        payload.top_k,
+        len(payload.current_markdown),
+    )
+    collection = chroma_client().get_or_create_collection(
+        name=collection_name(payload.assignment_id),
+        metadata=collection_metadata(),
+    )
+    skill, routing = resolve_skill(payload)
+
+    queries = build_search_queries(payload, skill)
+    run: AgentRunResult = improve_report_agent(
+        payload=payload,
+        skill=skill,
+        collection=collection,
+        query=queries,
+        current_markdown=payload.current_markdown,
+        embed_texts=embed_texts,
+        llm_client=llm_client,
+        quality_llm_client=evaluator_client,
+        evaluator_model=evaluator_model(),
+        evaluator_mode=evaluator_mode(),
+        normalize_markdown=normalize_markdown,
+        logger=logger,
+    )
+    logger.info(
+        "improve_done assignment_id=%s skill=%s retrieved=%s rewritten=%s reason=%s",
+        payload.assignment_id,
+        skill.id,
+        len(run.retrieved_evidence),
+        run.quality.rewrite_triggered,
+        run.draft_version_reason,
     )
     return ReportResponse(
         assignment_id=payload.assignment_id,

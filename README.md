@@ -1,8 +1,8 @@
 # FZU Homework Assistant
 
-面向课程作业场景的 AI 作业资料工作台。项目把“上传资料、任务类型识别、作业级 RAG 检索、报告生成、质量审稿、自动改写、报告保存、数据监控”串成一条可观测的 Agent 工作流，适合作为后端开发 / 大模型应用方向的简历项目展示。
+面向课程作业场景的 AI 作业资料工作台。项目把“上传资料、任务类型识别、作业级 RAG 检索、报告生成、独立质量审稿、自动改写、再次优化、报告保存、数据监控”串成一条可观测的 Agent 工作流，适合作为后端开发 / 大模型应用方向的简历项目展示。
 
-![课程作业 RAG + Agent 工作流](docs/assets/workflow-overview.png)
+![课程作业 RAG + Agent 工作流：含再次优化草稿与独立审稿模型](docs/assets/workflow-overview.png)
 
 ## 项目亮点
 
@@ -12,7 +12,8 @@
 - **Multi-Query Retrieval + Parent-Child Retrieval**：从作业描述、Skill、章节、报告计划、关键词 5 路构造 query；用 child chunk 精准命中，用 parent/section 上下文补足生成所需背景。
 - **Skill Routing + Dynamic Planner**：支持实验报告、论文总结、课程问答等固定业务 Skill；低置信度任务进入 `dynamic_planner`，先生成报告大纲 / 章节计划，再基于计划检索和生成正文。
 - **ReAct-lite Agent Loop**：Python Agent 按固定上限执行 `plan`、`retrieve`、`generate`、`quality`、`rewrite` 等步骤，避免无限循环，并输出完整 `agent_trace`。
-- **模型质量门控**：从结构完整度、证据贴合度、具体性、可提交性、低风险五个维度审稿；低于阈值时自动改写一次，并保留评分更高版本。
+- **独立质量审稿**：从结构完整度、证据贴合度、具体性、可编辑成熟度、低风险五个维度审稿；支持单独配置 evaluator 模型，未配置时回退默认生成模型，降低生成器自评虚高风险。
+- **自动改写与再次优化**：低于阈值时自动改写一次，并保留评分更高版本；用户编辑草稿或新增资料后，可先保存当前版本，再和原草稿一起交给 Agent 生成新草稿，新稿低分时保留原稿并说明原因。
 - **端到端可观测性**：Java 后端保存路由结果、检索证据、质量指标和 Agent Trace；前端展示 SSE 阶段日志、Agent Trace、RAG Evidence 和监控指标。
 - **Docker 一键启动**：前端、后端、Agent、MySQL、Redis、ChromaDB 通过 `docker compose` 编排，方便本地演示和 GitHub 复现。
 
@@ -26,9 +27,9 @@ Spring Boot Backend
   |  任务编排 / SSE 日志 / 报告版本 / MySQL 持久化 / Redis 预留
   v
 FastAPI Python Agent
-  |  Skill Routing / Assignment-scoped RAG / Agent Loop / 质量审稿 / 自动改写
+  |  Skill Routing / Assignment-scoped RAG / Agent Loop / 独立质量审稿 / 自动改写 / 再次优化
   v
-ChromaDB + DeepSeek OpenAI-compatible API + DashScope Embedding
+ChromaDB + Generator LLM + Evaluator LLM(optional) + DashScope Embedding
 ```
 
 数据存储：
@@ -49,9 +50,10 @@ ChromaDB + DeepSeek OpenAI-compatible API + DashScope Embedding
 8. 如果进入 `dynamic_planner`，Agent 先生成报告大纲 / 章节计划。
 9. Agent 构造多路 query，执行 cosine 向量召回、父子上下文合并和 hybrid score 重排。
 10. Agent 基于全局摘要、章节摘要和 Top-K 原文证据生成 Markdown 草稿。
-11. 质量门控审稿，必要时自动改写一次，并保留更好版本。
+11. 质量门控使用 evaluator 审稿，必要时自动改写一次，并保留更好版本。
 12. Java 后端保存报告、retrieved evidence、quality metrics 和 agent trace。
-13. 前端展示报告草稿、AI 工作流、RAG evidence 和数据监控指标。
+13. 前端展示报告草稿、质量结果卡片、AI 工作流、RAG evidence 和数据监控指标。
+14. 用户编辑草稿或补充资料后，可点击“再次优化”：系统先保存当前草稿，再结合原草稿与最新资料生成新草稿，并通过同一质量门控做版本保护。
 
 ## Agent Loop
 
@@ -88,7 +90,7 @@ plan_report_outline -> search_materials -> build_report_draft -> check_report_qu
 - `total_score`
 - `decision`: `PASS` / `NEEDS_REWRITE` / `NEEDS_USER_INPUT`
 
-质量门控采用五维加权：结构完整性 `25%`、证据贴合度 `25%`、内容具体性 `20%`、可提交性 `15%`、低风险 `15%`。其中低风险在代码中由 `(1 - risk_score)` 计入总分。该模块定位是自动质量门控，不是完全客观的最终评测；项目通过章节完整率、引用覆盖率、检索证据数量和占位符检测等本地信号，缓解单 Agent 自评可能偏高的问题。
+质量门控采用五维加权：结构完整性 `25%`、证据贴合度 `25%`、内容具体性 `20%`、可继续编辑成熟度 `15%`、低风险 `15%`。其中低风险在代码中由 `(1 - risk_score)` 计入总分。`QUALITY_PASS_SCORE=0.70` 表示“合格可编辑初稿”的通过线，不代表最终可直接提交。该模块定位是自动质量门控，不是完全客观的最终评测；项目支持通过独立 evaluator 模型和更严格的审稿 prompt 降低生成器自评虚高风险，并结合章节完整率、引用覆盖率、检索证据数量和占位符检测等本地信号辅助判断。质量结果会保存 evaluator 来源，前端质量卡片可显示“独立审稿模型评分”或“默认审稿器评分”。
 
 ## RAG 设计
 
@@ -202,11 +204,16 @@ LLM_PROVIDER=deepseek
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=your_deepseek_api_key
+EVALUATOR_BASE_URL=
+EVALUATOR_MODEL=
+EVALUATOR_API_KEY=
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=text-embedding-v2
 DASHSCOPE_API_KEY=your_dashscope_api_key
 QUALITY_PASS_SCORE=0.70
 ```
+
+`EVALUATOR_*` 可选；不配置时质量审稿回退使用默认生成模型。配置后，报告质量卡片会显示独立审稿模型来源。
 
 真实密钥只放本地 `.env`，不要提交到 GitHub。
 
@@ -274,6 +281,7 @@ Backend：
 - `POST /api/assignments/{id}/materials`
 - `DELETE /api/materials/{id}`
 - `POST /api/assignments/{id}/generate`
+- `POST /api/assignments/{id}/improve-report`
 - `GET /api/assignments/{id}/tasks`
 - `GET /api/tasks/{taskId}`
 - `POST /api/tasks/{taskId}/retry`
@@ -289,6 +297,7 @@ Agent：
 - `GET /agent/skills`
 - `POST /agent/index`
 - `POST /agent/generate-report`
+- `POST /agent/improve-report`
 
 ## Eval Harness
 
@@ -308,7 +317,7 @@ cd agent-python
 python evals/eval_harness.py evals/sample_results.jsonl --k 5
 ```
 
-如果要测 `Hit Rate@5` / `Recall@5`，需要准备小规模人工标注的 gold 集，例如 `gold_chunk_ids`、`gold_sections` 或 `gold_materials`。建议先做 20-50 条，用当前检索 top-10/top-20 辅助人工标注即可。后续增强可以把 `citation_coverage < 0.4`、`retrieved_chunks = 0`、`section_completeness < 1.0` 等情况做成硬性上限或直接禁止 `PASS`，减少模型自评虚高。
+如果要测 `Hit Rate@5` / `Recall@5`，需要准备小规模人工标注的 gold 集，例如 `gold_chunk_ids`、`gold_sections` 或 `gold_materials`。建议先做 20-50 条，用当前检索 top-10/top-20 辅助人工标注即可。后续可以继续探索 claim-evidence 评估、二次检索和更严格的本地一致性校验，进一步减少模型自评虚高。
 
 ## 项目结构
 

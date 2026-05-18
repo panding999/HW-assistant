@@ -114,6 +114,14 @@ public class AssignmentController {
         return task;
     }
 
+    @PostMapping("/assignments/{id}/improve-report")
+    public AgentTask improveReport(@PathVariable Long id) {
+        assignmentService.requireAssignment(id);
+        AgentTask task = agentWorkflowService.createImproveReportTask(id);
+        agentTaskRunner.runImproveReportTask(task.getId());
+        return task;
+    }
+
     @GetMapping("/assignments/{id}/tasks")
     public List<AgentTask> assignmentTasks(@PathVariable Long id) {
         return assignmentService.tasksOf(id);

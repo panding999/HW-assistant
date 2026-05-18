@@ -15,4 +15,9 @@ public class AgentTaskRunner {
     public void runReportTask(Long taskId) {
         agentWorkflowService.runReportTask(taskId);
     }
+
+    @Async
+    public void runImproveReportTask(Long taskId) {
+        agentWorkflowService.runImproveReportTask(taskId);
+    }
 }

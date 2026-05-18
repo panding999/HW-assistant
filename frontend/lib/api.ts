@@ -90,6 +90,10 @@ export const api = {
     request<AgentTask>(`/api/assignments/${assignmentId}/generate`, {
       method: "POST"
     }),
+  improveReport: (assignmentId: number) =>
+    request<AgentTask>(`/api/assignments/${assignmentId}/improve-report`, {
+      method: "POST"
+    }),
   task: (taskId: number) =>
     request<{ task: AgentTask; logs: AgentTaskLog[] }>(`/api/tasks/${taskId}`),
   assignmentTasks: (assignmentId: number) =>

@@ -77,6 +77,8 @@ class QualityMetrics(BaseModel):
     issues: list[str] = []
     rewrite_focus: list[str] = []
     quality_note: str
+    evaluator_model: str = ""
+    evaluator_mode: str = "fallback"
 
 
 class AgentRunResult(BaseModel):
@@ -111,6 +113,9 @@ def run_report_agent(
     build_prompt: Callable[[Any, Any, str], str],
     normalize_markdown: Callable[[str], str],
     logger: logging.Logger,
+    quality_llm_client: Callable[[], Any] | None = None,
+    evaluator_model: str | None = None,
+    evaluator_mode: str = "fallback",
     max_steps: int = 5,
 ) -> AgentRunResult:
     trace: list[AgentTraceStep] = []
@@ -210,16 +215,20 @@ def run_report_agent(
     )
 
     pass_score = quality_pass_score()
+    quality_client = quality_llm_client or llm_client
+    quality_model = evaluator_model or os.getenv("LLM_MODEL", "deepseek-v4-flash")
     started = time.perf_counter()
     quality = evaluate_quality(
         markdown,
         skill.required_sections,
         evidence,
         rewrite_triggered=False,
-        llm_client=llm_client,
+        llm_client=quality_client,
         payload=payload,
         skill=skill,
         pass_score=pass_score,
+        evaluator_model=quality_model,
+        evaluator_mode=evaluator_mode,
     )
     record(
         stage="quality",
@@ -252,10 +261,12 @@ def run_report_agent(
             skill.required_sections,
             evidence,
             rewrite_triggered=True,
-            llm_client=llm_client,
+            llm_client=quality_client,
             payload=payload,
             skill=skill,
             pass_score=pass_score,
+            evaluator_model=quality_model,
+            evaluator_mode=evaluator_mode,
         )
         if rewritten_quality.total_score >= original_quality.total_score:
             markdown = rewritten_markdown
@@ -300,6 +311,222 @@ def run_report_agent(
         markdown=markdown.strip(),
         retrieved_evidence=evidence,
         quality=quality,
+        agent_trace=trace,
+        draft_version_reason=draft_version_reason,
+    )
+
+
+def improve_report_agent(
+    *,
+    payload: Any,
+    skill: Any,
+    collection: Any,
+    query: str | list[SearchQuery],
+    current_markdown: str,
+    embed_texts: Callable[[list[str]], list[list[float]]],
+    llm_client: Callable[[], Any],
+    normalize_markdown: Callable[[str], str],
+    logger: logging.Logger,
+    quality_llm_client: Callable[[], Any] | None = None,
+    evaluator_model: str | None = None,
+    evaluator_mode: str = "fallback",
+    max_steps: int = 6,
+) -> AgentRunResult:
+    trace: list[AgentTraceStep] = []
+
+    def record(
+        *,
+        stage: str,
+        tool_name: str,
+        input_summary: str,
+        started: float,
+        output_summary: str,
+        status: str = "SUCCEEDED",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        trace.append(
+            AgentTraceStep(
+                step_index=len(trace) + 1,
+                stage=stage,
+                tool_name=tool_name,
+                input_summary=input_summary,
+                output_summary=output_summary,
+                status=status,
+                duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
+                details=details or {},
+            )
+        )
+
+    logger.info(
+        "agent_improve_start assignment_id=%s skill=%s max_steps=%s",
+        payload.assignment_id,
+        skill.id,
+        max_steps,
+    )
+
+    started = time.perf_counter()
+    search_result = search_materials(collection, query, payload.top_k, embed_texts)
+    evidence = search_result.evidence
+    context_text = evidence_context(evidence)
+    record(
+        stage="retrieve",
+        tool_name="search_materials",
+        input_summary=f"top_k={payload.top_k} query_count={search_result.query_count}",
+        output_summary=(
+            f"raw_hits={search_result.raw_hits}; deduped={search_result.deduped_hits}; "
+            f"parents={search_result.parent_merged_hits}; retrieved={len(evidence)}"
+        ),
+        started=started,
+        details={
+            "query_count": search_result.query_count,
+            "raw_hits": search_result.raw_hits,
+            "deduped_hits": search_result.deduped_hits,
+            "parent_merged_hits": search_result.parent_merged_hits,
+            "retrieved": len(evidence),
+        },
+    )
+
+    pass_score = quality_pass_score()
+    quality_client = quality_llm_client or llm_client
+    quality_model = evaluator_model or os.getenv("LLM_MODEL", "deepseek-v4-flash")
+    started = time.perf_counter()
+    baseline_quality = evaluate_quality(
+        current_markdown,
+        skill.required_sections,
+        evidence,
+        rewrite_triggered=False,
+        llm_client=quality_client,
+        payload=payload,
+        skill=skill,
+        pass_score=pass_score,
+        evaluator_model=quality_model,
+        evaluator_mode=evaluator_mode,
+    )
+    record(
+        stage="quality",
+        tool_name="check_current_draft_quality",
+        input_summary=f"current_chars={len(current_markdown)} evidence={len(evidence)}",
+        output_summary=f"current_score={baseline_quality.total_score:.0%}; {baseline_quality.quality_note}",
+        started=started,
+    )
+
+    started = time.perf_counter()
+    candidate_markdown = build_improved_report_draft(
+        payload=payload,
+        skill=skill,
+        current_markdown=current_markdown,
+        context_text=context_text,
+        baseline_quality=baseline_quality,
+        llm_client=llm_client,
+        normalize_markdown=normalize_markdown,
+    )
+    record(
+        stage="generate",
+        tool_name="build_improved_report_draft",
+        input_summary=f"current_chars={len(current_markdown)} evidence={len(evidence)}",
+        output_summary=f"candidate_chars={len(candidate_markdown)}",
+        started=started,
+    )
+
+    started = time.perf_counter()
+    candidate_quality = evaluate_quality(
+        candidate_markdown,
+        skill.required_sections,
+        evidence,
+        rewrite_triggered=False,
+        llm_client=quality_client,
+        payload=payload,
+        skill=skill,
+        pass_score=pass_score,
+        evaluator_model=quality_model,
+        evaluator_mode=evaluator_mode,
+    )
+    record(
+        stage="quality",
+        tool_name="check_candidate_quality",
+        input_summary=f"candidate_chars={len(candidate_markdown)} evidence={len(evidence)}",
+        output_summary=f"candidate_score={candidate_quality.total_score:.0%}; {candidate_quality.quality_note}",
+        started=started,
+    )
+
+    best_candidate_markdown = candidate_markdown
+    best_candidate_quality = candidate_quality
+    if len(trace) < max_steps and should_rewrite(candidate_markdown, candidate_quality, evidence):
+        started = time.perf_counter()
+        rewritten_markdown = rewrite_report(payload, skill, candidate_markdown, context_text, candidate_quality, llm_client, normalize_markdown)
+        rewritten_quality = evaluate_quality(
+            rewritten_markdown,
+            skill.required_sections,
+            evidence,
+            rewrite_triggered=True,
+            llm_client=quality_client,
+            payload=payload,
+            skill=skill,
+            pass_score=pass_score,
+            evaluator_model=quality_model,
+            evaluator_mode=evaluator_mode,
+        )
+        if rewritten_quality.total_score >= candidate_quality.total_score:
+            best_candidate_markdown = rewritten_markdown
+            best_candidate_quality = rewritten_quality
+            rewrite_summary = f"accepted_rewrite=true; rewrite_score={rewritten_quality.total_score:.0%}"
+        else:
+            best_candidate_quality = candidate_quality.copy(update={"rewrite_triggered": True})
+            rewrite_summary = (
+                f"accepted_rewrite=false; candidate_score={candidate_quality.total_score:.0%}; "
+                f"rewrite_score={rewritten_quality.total_score:.0%}; kept_candidate=true"
+            )
+        record(
+            stage="rewrite",
+            tool_name="rewrite_report",
+            input_summary="candidate quality gate requested rewrite",
+            output_summary=rewrite_summary,
+            started=started,
+        )
+
+    started = time.perf_counter()
+    if best_candidate_quality.total_score > baseline_quality.total_score:
+        final_markdown = best_candidate_markdown
+        final_quality = best_candidate_quality
+        draft_version_reason = (
+            f"再次优化已采纳：质量分从 {baseline_quality.total_score:.0%} "
+            f"提升到 {final_quality.total_score:.0%}。"
+        )
+        compare_summary = (
+            f"accepted_improvement=true; baseline_score={baseline_quality.total_score:.0%}; "
+            f"candidate_score={final_quality.total_score:.0%}"
+        )
+    else:
+        final_markdown = current_markdown
+        final_quality = baseline_quality
+        draft_version_reason = (
+            f"本次优化未采纳：候选稿评分 {best_candidate_quality.total_score:.0%} "
+            f"未高于当前草稿 {baseline_quality.total_score:.0%}，已保留用户当前草稿。"
+        )
+        compare_summary = (
+            f"accepted_improvement=false; baseline_score={baseline_quality.total_score:.0%}; "
+            f"candidate_score={best_candidate_quality.total_score:.0%}; kept_current=true"
+        )
+    record(
+        stage="compare",
+        tool_name="compare_improved_draft",
+        input_summary="compare current draft with optimized candidate",
+        output_summary=compare_summary,
+        started=started,
+    )
+
+    logger.info(
+        "agent_improve_done assignment_id=%s steps=%s accepted=%s decision=%s total_score=%.2f",
+        payload.assignment_id,
+        len(trace),
+        "accepted_improvement=true" in compare_summary,
+        final_quality.decision,
+        final_quality.total_score,
+    )
+    return AgentRunResult(
+        markdown=final_markdown.strip(),
+        retrieved_evidence=evidence,
+        quality=final_quality,
         agent_trace=trace,
         draft_version_reason=draft_version_reason,
     )
@@ -503,6 +730,61 @@ def build_report_draft(
     return normalize_markdown(response.choices[0].message.content or "")
 
 
+def build_improved_report_draft(
+    *,
+    payload: Any,
+    skill: Any,
+    current_markdown: str,
+    context_text: str,
+    baseline_quality: QualityMetrics,
+    llm_client: Callable[[], Any],
+    normalize_markdown: Callable[[str], str],
+) -> str:
+    issues = "\n".join(f"- {item}" for item in baseline_quality.issues[:6]) or "- 当前草稿可以在资料依据、细节和表达上继续增强。"
+    focus = "\n".join(f"- {item}" for item in baseline_quality.rewrite_focus[:6]) or "- 保留用户已有修改，补充最新资料依据。"
+    prompt = f"""
+请基于当前草稿继续优化一版中文 Markdown 报告。
+这是“再次优化草稿”任务：用户可能已经手动修改过草稿，也可能刚刚新增了资料。
+
+必须遵守：
+- 保留当前草稿中明确、有价值的用户修改，不要重写成完全不同的结构。
+- 使用最新检索资料补充依据、步骤、结论和来源标注。
+- 不要输出“以下是”“优化版”等元说明。
+- 不要输出“待补充”“TODO”“TBD”等未完成占位符。
+- 只输出 Markdown 正文。
+
+作业标题：{getattr(payload, "title", "") or "未提供"}
+课程：{getattr(payload, "course", None) or "未提供"}
+作业说明：{getattr(payload, "description", None) or "未提供"}
+
+必要或建议章节：{"、".join(getattr(skill, "required_sections", []))}
+
+当前质量反馈：
+{baseline_quality.review_summary or baseline_quality.quality_note}
+
+当前问题：
+{issues}
+
+优化重点：
+{focus}
+
+最新带来源标签的资料摘录：
+{context_text or "未检索到相关资料。请尽量保守优化，不要编造资料。"}
+
+当前草稿：
+{current_markdown}
+""".strip()
+    response = llm_client().chat.completions.create(
+        model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
+        messages=[
+            {"role": "system", "content": getattr(skill, "system_prompt", "") or "你是严谨的中文作业报告优化助手。"},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
+    )
+    return normalize_markdown(response.choices[0].message.content or current_markdown)
+
+
 def plan_report_outline(payload: Any, skill: Any, llm_client: Callable[[], Any]) -> str:
     prompt = f"""
 请先为当前开放型作业设计一份中文报告写作计划。只输出 Markdown，不要写正式报告正文。
@@ -600,8 +882,11 @@ def evaluate_quality(
     payload: Any | None = None,
     skill: Any | None = None,
     pass_score: float | None = None,
+    evaluator_model: str | None = None,
+    evaluator_mode: str = "fallback",
 ) -> QualityMetrics:
     pass_score = quality_pass_score() if pass_score is None else clamp01(pass_score)
+    evaluator_model = evaluator_model or os.getenv("LLM_MODEL", "deepseek-v4-flash")
     section_completeness = calculate_section_completeness(markdown, required_sections)
     citation_coverage = calculate_citation_coverage(markdown, evidence)
 
@@ -614,6 +899,7 @@ def evaluate_quality(
         skill=skill,
         section_completeness=section_completeness,
         citation_coverage=citation_coverage,
+        evaluator_model=evaluator_model,
     )
     manual_review_reason = manual_review_reason_for(markdown)
     total_score = model_quality_score(review)
@@ -650,6 +936,8 @@ def evaluate_quality(
         issues=review.issues[:8],
         rewrite_focus=review.rewrite_focus[:8],
         quality_note=note,
+        evaluator_model=evaluator_model,
+        evaluator_mode=evaluator_mode,
     )
 
 
@@ -663,6 +951,7 @@ def review_quality_with_llm(
     skill: Any | None,
     section_completeness: float,
     citation_coverage: float,
+    evaluator_model: str,
 ) -> QualityReview:
     if llm_client is None:
         return fallback_quality_review(markdown, evidence, section_completeness, citation_coverage)
@@ -690,13 +979,27 @@ def review_quality_with_llm(
         "draft_markdown": summarize(markdown, 7000),
     }
     prompt = f"""
-你是作业报告质量审稿器。请只基于给定草稿和检索证据评价，不要补写正文。
+你是严格但不过度保守的课程作业草稿质量审稿器。请只基于给定草稿和检索证据评价，不要补写正文。
+你的目标不是判断最终能否直接提交，而是判断这份草稿是否已经是高质量、可继续编辑的初稿。
+
+请区分问题严重程度：
+- 小问题：表达略泛、局部可展开、引用密度不高。可以轻微扣分，但不要直接判失败。
+- 中问题：章节存在但支撑不足，部分内容需要明显补强。分数应体现明显改写空间。
+- 大问题：任务跑偏、关键章节缺失、明显编造、证据与正文不匹配。应明显降低 grounding/readiness，并提高 risk。
+
+评分原则：
+- 不因草稿承认证据有限而直接低分；资料有限但表达诚实时，只影响 grounding/readiness。
+- 不奖励空泛但流畅的文字。
+- 如果内容保守且结构完整，可以给中高分。
+- 如果存在无依据断言或证据不匹配，应重点扣 grounding 并提高 risk。
+- readiness 表示“用户能否基于它快速完成最终稿”，不是“是否已经可直接提交”。
+
 按 0 到 1 给分：
 - structure: 是否覆盖必要章节、层次是否清楚
-- grounding: 是否忠实使用证据，缺证据时不要给高分
+- grounding: 正文是否被检索证据支撑，证据与论述是否匹配
 - specificity: 是否有具体实现建议、指标、步骤，而不是泛泛而谈
-- readiness: 是否接近可提交草稿
-- risk: 幻觉、无依据断言、任务跑偏、资料不足等风险，风险越高分越高
+- readiness: 是否是高质量、可继续编辑的初稿，用户是否能快速完成最终稿
+- risk: 幻觉、无依据断言、任务跑偏、证据不匹配等风险，风险越高分越高
 
 返回严格 JSON，不要 Markdown，不要代码块：
 {{
@@ -719,9 +1022,9 @@ def review_quality_with_llm(
 """.strip()
     try:
         response = llm_client().chat.completions.create(
-            model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
+            model=evaluator_model,
             messages=[
-                {"role": "system", "content": "你只输出可解析 JSON。"},
+                {"role": "system", "content": "你是严格但不过度保守的中文课程作业草稿审稿器，只输出可解析 JSON。"},
                 {"role": "user", "content": prompt},
             ],
             temperature=0,

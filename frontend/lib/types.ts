@@ -69,6 +69,8 @@ export type AgentQualityMetrics = {
   issues?: string[];
   rewrite_focus?: string[];
   quality_note?: string;
+  evaluator_model?: string;
+  evaluator_mode?: "independent" | "fallback" | string;
 };
 
 export type RetrievedEvidence = {

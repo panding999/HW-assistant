@@ -220,7 +220,7 @@ export default function HomePage() {
   );
   const visibleLogs = useMemo(() => latestStageLogs(logs), [logs]);
   const isDemo = selected?.id < 0;
-  const latestTask = taskHistory[0] ?? activeTask;
+  const latestTask = activeTask ?? taskHistory[0];
   const latestTrace = useMemo(() => parseJsonList<AgentTraceStep>(latestTask?.agentTraceJson), [latestTask?.agentTraceJson]);
   const latestEvidence = useMemo(() => parseJsonList<RetrievedEvidence>(latestTask?.retrievedEvidenceJson), [latestTask?.retrievedEvidenceJson]);
   const latestQuality = useMemo(() => parseJsonObject<AgentQualityMetrics>(latestTask?.qualityMetricsJson), [latestTask?.qualityMetricsJson]);
@@ -261,7 +261,7 @@ export default function HomePage() {
     source.addEventListener("log", (event) => {
       const log = JSON.parse(event.data) as AgentTaskLog;
       setLogs((current) => [...current, log]);
-      if (log.status === "SUCCEEDED" || log.status === "FAILED") {
+      if (isTerminalTaskLog(log)) {
         if (log.stage === "done" || log.status === "FAILED") {
           source.close();
           setActiveTask(null);
@@ -534,6 +534,32 @@ export default function HomePage() {
       setLogs([{ taskId: task.id, stage: "queued", status: "QUEUED", message: "重试任务已创建，等待 Agent 执行。" }]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "重试失败。");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function improveReport() {
+    if (!selected || isDemo || !report || report.id < 0) {
+      setError("请先生成或保存一份真实报告草稿，再进行再次优化。");
+      return;
+    }
+    if (materials.length === 0) {
+      setError("请先上传资料，再进行再次优化。");
+      return;
+    }
+    setIsBusy(true);
+    setError(null);
+    setLogs([]);
+    try {
+      const saved = await api.updateReport(report.id, markdown);
+      setReport(saved);
+      setMarkdown(normalizeMarkdown(saved.markdown));
+      const task = await api.improveReport(selected.id);
+      setActiveTask(task);
+      setLogs([{ taskId: task.id, stage: "queued", status: "QUEUED", message: "已保存当前草稿，等待 Agent 结合最新资料再次优化。" }]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "再次优化任务创建失败。");
     } finally {
       setIsBusy(false);
     }
@@ -820,30 +846,65 @@ export default function HomePage() {
           </Card>
 
           <Card className="flex min-h-0 flex-col overflow-hidden">
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-3 py-3">
-              <h2 className="flex shrink-0 items-center gap-2 text-sm font-semibold leading-5">
-                <FileText size={16} />
-                <span className="whitespace-nowrap">报告草稿</span>
-              </h2>
-              <div className="flex min-w-0 items-center justify-end gap-2">
-                {report && (
-                  <div className="hidden shrink-0 text-right text-xs text-slate-500 2xl:block">
-                    <p>v{report.version}</p>
-                    <p>{formatDateTime(report.updatedAt)}</p>
-                  </div>
-                )}
-                <Button className="h-8 whitespace-nowrap px-2.5 text-xs" size="sm" variant={reportMode === "preview" ? "primary" : "outline"} onClick={() => setReportMode("preview")}>预览</Button>
-                <Button className="h-8 whitespace-nowrap px-2.5 text-xs" size="sm" variant={reportMode === "edit" ? "primary" : "outline"} onClick={() => setReportMode("edit")}>编辑</Button>
-                <Button className="h-8 whitespace-nowrap px-2.5 text-xs" size="sm" variant="primary" onClick={saveReport} disabled={!report || report.id < 0 || isBusy}>
+            <div className="flex shrink-0 flex-col gap-3 border-b border-slate-100 px-3 py-3 xl:flex-row xl:items-center xl:justify-between">
+              <div className="flex min-w-0 items-start gap-2">
+                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-moss-50 text-moss-800 dark:bg-moss-900/40 dark:text-moss-200">
+                  <FileText size={16} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="truncate text-sm font-semibold leading-5 text-slate-950 dark:text-slate-100">报告草稿</h2>
+                  {report && (
+                    <p className="mt-0.5 truncate text-xs leading-5 text-slate-500">
+                      v{report.version}{report.updatedAt ? ` · ${formatDateTime(report.updatedAt)}` : ""}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-2 xl:justify-end">
+                <div className="inline-flex h-9 overflow-hidden rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+                  <Button className="h-8 rounded-md border-transparent px-3 text-xs shadow-none" size="sm" variant={reportMode === "preview" ? "primary" : "ghost"} onClick={() => setReportMode("preview")}>预览</Button>
+                  <Button className="h-8 rounded-md border-transparent px-3 text-xs shadow-none" size="sm" variant={reportMode === "edit" ? "primary" : "ghost"} onClick={() => setReportMode("edit")}>编辑</Button>
+                </div>
+                <Button className="h-9 rounded-lg border-moss-700 bg-moss-700 px-3 text-xs text-white shadow-sm hover:bg-moss-800" size="sm" variant="primary" onClick={saveReport} disabled={!report || report.id < 0 || isBusy}>
                   <Save size={15} />
                   保存
                 </Button>
-                <Button className="h-8 whitespace-nowrap px-2.5 text-xs" size="sm" onClick={exportReport} disabled={!report || report.id < 0}>
+                <Button className="h-9 rounded-lg !border-emerald-200 !bg-emerald-50 px-3 text-xs font-semibold !text-emerald-800 shadow-sm ring-1 ring-emerald-100 hover:!border-emerald-300 hover:!bg-emerald-100 dark:!border-emerald-800 dark:!bg-emerald-950/40 dark:!text-emerald-100 dark:ring-emerald-900/60" size="sm" onClick={improveReport} disabled={!report || report.id < 0 || isBusy || Boolean(activeTask)}>
+                  <Sparkles size={15} />
+                  再次优化
+                </Button>
+                <Button className="h-9 rounded-lg !border-sky-200 !bg-sky-50 px-3 text-xs font-semibold !text-sky-800 shadow-sm hover:!border-sky-300 hover:!bg-sky-100 dark:!border-sky-800 dark:!bg-sky-950/40 dark:!text-sky-100" size="sm" onClick={exportReport} disabled={!report || report.id < 0}>
                   <Download size={15} />
                   导出
                 </Button>
               </div>
             </div>
+            {latestQuality && (
+              <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/60">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 font-medium text-slate-700 shadow-sm dark:bg-slate-950 dark:text-slate-200">
+                    <ShieldCheck size={14} />
+                    质量分 {formatPercent(latestQuality.total_score ?? 0)}
+                  </span>
+                  <span className="rounded-full bg-white px-2.5 py-1 text-slate-600 shadow-sm dark:bg-slate-950 dark:text-slate-300">阈值 {formatPercent(latestQuality.pass_score ?? 0)}</span>
+                  <span className={`rounded-full px-2.5 py-1 font-medium ${qualityDecisionClass(latestQuality.decision)}`}>{statusText(latestQuality.decision || "NEEDS_REWRITE")}</span>
+                  {latestQuality.rewrite_triggered && <span className="rounded-full bg-rose-50 px-2.5 py-1 text-rose-700">已触发自动改写</span>}
+                </div>
+                <p className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                  {qualityEvaluatorLabel(latestQuality)}
+                </p>
+                {(latestQuality.review_summary || latestQuality.quality_note) && (
+                  <p className="mt-2 text-xs leading-5 text-slate-600 dark:text-slate-300">{latestQuality.review_summary || latestQuality.quality_note}</p>
+                )}
+                {latestQuality.issues && latestQuality.issues.length > 0 && (
+                  <p className="mt-2 line-clamp-2 text-xs leading-5 text-amber-700">问题：{latestQuality.issues.join("；")}</p>
+                )}
+                {latestQuality.rewrite_focus && latestQuality.rewrite_focus.length > 0 && (
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-moss-800">建议：{latestQuality.rewrite_focus.join("；")}</p>
+                )}
+                {latestTask?.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{latestTask.draftVersionReason}</p>}
+              </div>
+            )}
             {reportMode === "edit" ? (
               <textarea
                 className="min-h-0 flex-1 resize-none border-0 bg-white p-4 font-mono text-[13px] leading-6 text-slate-900 outline-none dark:bg-slate-900 dark:text-slate-100"
@@ -1506,6 +1567,24 @@ function statusText(status: string) {
   return labels[status] || status;
 }
 
+function isTerminalTaskLog(log: AgentTaskLog) {
+  return log.status === "FAILED"
+    || (log.stage === "done" && ["SUCCEEDED", "NEEDS_REWRITE", "NEEDS_USER_INPUT"].includes(log.status));
+}
+
+function qualityDecisionClass(decision?: string) {
+  if (decision === "PASS") return "bg-emerald-50 text-emerald-700";
+  if (decision === "NEEDS_USER_INPUT") return "bg-orange-50 text-orange-700";
+  return "bg-amber-50 text-amber-700";
+}
+
+function qualityEvaluatorLabel(quality: AgentQualityMetrics) {
+  if (quality.evaluator_mode === "independent" && quality.evaluator_model) {
+    return `独立审稿模型：${quality.evaluator_model}`;
+  }
+  return "默认审稿器评分";
+}
+
 function stageLabel(stage: string) {
   const labels: Record<string, string> = {
     queued: "任务排队",
@@ -1515,6 +1594,7 @@ function stageLabel(stage: string) {
     generate: "生成报告草稿",
     quality: "质量检查",
     rewrite: "自动改写",
+    compare: "质量对比",
     done: "完成",
     failed: "失败"
   };
@@ -1524,7 +1604,7 @@ function stageLabel(stage: string) {
 function latestStageLogs(logs: AgentTaskLog[]) {
   const byStage = new Map<string, AgentTaskLog>();
   for (const log of logs) byStage.set(log.stage, log);
-  return ["queued", "skill", "parse", "retrieve", "generate", "quality", "rewrite", "done", "failed"]
+  return ["queued", "skill", "parse", "retrieve", "generate", "quality", "rewrite", "compare", "done", "failed"]
     .map((stage) => byStage.get(stage))
     .filter((log): log is AgentTaskLog => Boolean(log));
 }

@@ -80,6 +80,30 @@ public class AgentWorkflowService {
         return taskMapper.selectById(task.getId());
     }
 
+    public AgentTask createImproveReportTask(Long assignmentId) {
+        Long materialCount = materialMapper.selectCount(
+                Wrappers.<Material>lambdaQuery().eq(Material::getAssignmentId, assignmentId)
+        );
+        if (materialCount == null || materialCount == 0) {
+            throw new IllegalArgumentException("请先上传 PDF、Markdown 或 TXT 资料，再优化报告草稿。");
+        }
+        Report report = reportMapper.selectOne(
+                Wrappers.<Report>lambdaQuery().eq(Report::getAssignmentId, assignmentId)
+        );
+        if (report == null || report.getMarkdown() == null || report.getMarkdown().isBlank()) {
+            throw new IllegalArgumentException("请先生成或保存一份报告草稿，再进行再次优化。");
+        }
+
+        AgentTask task = new AgentTask();
+        task.setAssignmentId(assignmentId);
+        task.setType("IMPROVE_REPORT");
+        task.setStatus("QUEUED");
+        task.setCurrentStage("queued");
+        taskMapper.insert(task);
+        log.info("improve_task_created taskId={} assignmentId={} materials={}", task.getId(), assignmentId, materialCount);
+        return taskMapper.selectById(task.getId());
+    }
+
     public AgentTask retryTask(Long taskId) {
         AgentTask oldTask = taskMapper.selectById(taskId);
         if (oldTask == null) {
@@ -271,6 +295,182 @@ public class AgentWorkflowService {
             return objectMapper.writeValueAsString(payload);
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Failed to serialize Agent request.", ex);
+        }
+    }
+
+    public void runImproveReportTask(Long taskId) {
+        AgentTask task = taskMapper.selectById(taskId);
+        if (task == null) {
+            log.warn("improve_task_missing taskId={}", taskId);
+            return;
+        }
+
+        String currentStage = "queued";
+        long workflowStarted = System.nanoTime();
+        try {
+            task.setStatus("RUNNING");
+            task.setStartedAt(LocalDateTime.now());
+            taskMapper.updateById(task);
+            log.info("improve_task_start taskId={} assignmentId={}", taskId, task.getAssignmentId());
+
+            Assignment assignment = assignmentMapper.selectById(task.getAssignmentId());
+            if (assignment == null) {
+                throw new IllegalStateException("Assignment not found.");
+            }
+
+            Report report = reportMapper.selectOne(
+                    Wrappers.<Report>lambdaQuery().eq(Report::getAssignmentId, assignment.getId())
+            );
+            if (report == null || report.getMarkdown() == null || report.getMarkdown().isBlank()) {
+                throw new IllegalStateException("请先保存一份报告草稿，再进行再次优化。");
+            }
+
+            List<Material> materials = materialMapper.selectList(
+                    Wrappers.<Material>lambdaQuery().eq(Material::getAssignmentId, assignment.getId())
+            );
+            if (materials.isEmpty()) {
+                throw new IllegalStateException("Please upload at least one material before improving a report.");
+            }
+
+            currentStage = "parse";
+            taskLogService.push(taskId, currentStage, "RUNNING", "正在重新解析最新资料，为再次优化准备检索上下文。");
+            long stageStarted = System.nanoTime();
+            materials.forEach(material -> {
+                material.setIndexStatus("INDEXING");
+                material.setErrorMessage(null);
+                materialMapper.updateById(material);
+            });
+
+            Map<String, Object> indexPayload = new LinkedHashMap<>();
+            indexPayload.put("assignment_id", assignment.getId());
+            indexPayload.put("title", assignment.getTitle());
+            indexPayload.put("description", assignment.getDescription());
+            indexPayload.put("materials", materials.stream().map(this::materialPayload).toList());
+
+            Map<?, ?> indexResponse = restClient.post()
+                    .uri("/agent/index")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(toJson(indexPayload))
+                    .retrieve()
+                    .body(Map.class);
+            Object chunkValue = indexResponse == null ? 0 : indexResponse.get("chunks_indexed");
+            int chunks = chunkValue instanceof Number ? ((Number) chunkValue).intValue() : 0;
+            if (chunks == 0) {
+                throw new IllegalStateException("资料无法提取有效文本，请上传可复制文本的 PDF、Markdown 或 TXT 后重试。");
+            }
+            materials.forEach(material -> {
+                material.setIndexStatus("INDEXED");
+                material.setErrorMessage(null);
+                materialMapper.updateById(material);
+            });
+            taskLogService.push(taskId, currentStage, "SUCCEEDED", "最新资料解析完成，已向量化 " + chunks + " 个资料片段。");
+            log.info(
+                    "improve_task_stage_done taskId={} assignmentId={} stage=parse chunks={} durationMs={}",
+                    taskId,
+                    assignment.getId(),
+                    chunks,
+                    elapsedMs(stageStarted)
+            );
+
+            Map<String, Object> improvePayload = new LinkedHashMap<>();
+            improvePayload.put("assignment_id", assignment.getId());
+            improvePayload.put("title", assignment.getTitle());
+            improvePayload.put("course", assignment.getCourse());
+            improvePayload.put("description", assignment.getDescription());
+            improvePayload.put("skill_id", effectiveSkillId(assignment));
+            improvePayload.put("top_k", 8);
+            improvePayload.put("current_markdown", report.getMarkdown());
+
+            currentStage = "improve";
+            taskLogService.push(taskId, "generate", "RUNNING", "正在结合当前草稿和最新资料生成候选优化稿。");
+            stageStarted = System.nanoTime();
+            Map<?, ?> reportResponse = restClient.post()
+                    .uri("/agent/improve-report")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(toJson(improvePayload))
+                    .retrieve()
+                    .body(Map.class);
+
+            Object markdownValue = reportResponse == null ? "" : reportResponse.get("markdown");
+            String markdown = markdownValue == null ? report.getMarkdown() : String.valueOf(markdownValue);
+            String resolvedSkillId = normalizeResolvedSkillId(valueOf(reportResponse, "resolved_skill_id", "lab_report"));
+            String routingMode = valueOf(reportResponse, "routing_mode", "known_skill");
+            double routingConfidence = doubleValue(reportResponse, "routing_confidence", 1.0);
+            String routingReason = chineseReason(valueOf(reportResponse, "routing_reason", "未返回路由原因。"), "Agent 已完成任务类型识别。");
+            Object retrievedEvidence = reportResponse == null ? null : reportResponse.get("retrieved_evidence");
+            Object quality = reportResponse == null ? null : reportResponse.get("quality");
+            Object agentTrace = reportResponse == null ? null : reportResponse.get("agent_trace");
+            String draftVersionReason = valueOf(reportResponse, "draft_version_reason", "再次优化已完成。");
+            int retrievedCount = listSize(retrievedEvidence);
+            String qualityNote = qualityNote(quality);
+            boolean rewriteTriggered = rewriteTriggered(quality);
+            String finalStatus = finalStatus(quality);
+
+            if (markdown.trim().equals(report.getMarkdown().trim())) {
+                log.info("report_kept_after_improve assignmentId={} reportId={} version={}", assignment.getId(), report.getId(), report.getVersion());
+            } else {
+                upsertReport(assignment, markdown);
+            }
+            assignment.setResolvedSkillId(resolvedSkillId);
+            assignment.setStatus("DONE");
+            assignmentMapper.updateById(assignment);
+
+            AgentTask completed = taskMapper.selectById(taskId);
+            if (completed != null) {
+                completed.setStatus(finalStatus);
+                completed.setCurrentStage("done");
+                completed.setFinishedAt(LocalDateTime.now());
+                completed.setErrorMessage(null);
+                completed.setResolvedSkillId(resolvedSkillId);
+                completed.setRoutingConfidence(routingConfidence);
+                completed.setRoutingReason(routingReason);
+                completed.setRetrievedEvidenceJson(toJsonOrNull(retrievedEvidence));
+                completed.setQualityMetricsJson(toJsonOrNull(quality));
+                completed.setAgentTraceJson(toJsonOrNull(agentTrace));
+                completed.setDraftVersionReason(draftVersionReason);
+                taskMapper.updateById(completed);
+            }
+
+            taskLogService.push(taskId, "skill", "SUCCEEDED", routingMessage(resolvedSkillId, routingMode, routingConfidence, routingReason));
+            taskLogService.push(taskId, "retrieve", "SUCCEEDED", "RAG 检索完成，命中 " + retrievedCount + " 个最新资料片段。");
+            taskLogService.push(taskId, "generate", "SUCCEEDED", "已生成候选优化稿，并与当前草稿进行质量对比。");
+            taskLogService.push(taskId, "quality", finalStatus, qualityNote);
+            if (rewriteTriggered) {
+                taskLogService.push(taskId, "rewrite", finalStatus, draftVersionReason);
+            }
+            taskLogService.push(taskId, "done", finalStatus, draftVersionReason);
+            log.info(
+                    "improve_task_done taskId={} assignmentId={} status={} durationMs={} reason={}",
+                    taskId,
+                    assignment.getId(),
+                    finalStatus,
+                    elapsedMs(workflowStarted),
+                    draftVersionReason
+            );
+        } catch (Exception ex) {
+            String friendlyMessage = friendlyError(ex.getMessage());
+            log.error("improve_task_failed taskId={} stage={} message={}", taskId, currentStage, friendlyMessage, ex);
+            Assignment assignment = task == null ? null : assignmentMapper.selectById(task.getAssignmentId());
+            if ("parse".equals(currentStage) && assignment != null) {
+                materialMapper.selectList(
+                        Wrappers.<Material>lambdaQuery().eq(Material::getAssignmentId, assignment.getId())
+                ).forEach(material -> {
+                    material.setIndexStatus("FAILED");
+                    material.setErrorMessage(friendlyMessage);
+                    materialMapper.updateById(material);
+                });
+            }
+            AgentTask failed = taskMapper.selectById(taskId);
+            if (failed != null) {
+                failed.setStatus("FAILED");
+                failed.setCurrentStage(currentStage);
+                failed.setErrorMessage(friendlyMessage);
+                failed.setFinishedAt(LocalDateTime.now());
+                taskMapper.updateById(failed);
+            }
+            taskLogService.push(taskId, currentStage, "FAILED", friendlyMessage);
         }
     }
 
