@@ -2,7 +2,9 @@
 
 面向课程作业场景的 AI 作业资料工作台。项目把“上传资料、任务类型识别、作业级 RAG 检索、报告生成、独立质量审稿、自动改写、再次优化、报告保存、数据监控”串成一条可观测的 Agent 工作流，适合作为后端开发 / 大模型应用方向的简历项目展示。
 
-![课程作业 RAG + Agent 工作流：含再次优化草稿与独立审稿模型](docs/assets/workflow-overview.png)
+![HW-assistant 智能作业报告生成与评测平台总览](docs/assets/workflow-overview.png)
+
+> 深色图用于展示项目整体能力与监控评测结果；下方 RAG 设计章节保留白底流程图，展示端到端链路和检索细节。
 
 ## 项目亮点
 
@@ -90,11 +92,13 @@ plan_report_outline -> search_materials -> build_report_draft -> check_report_qu
 - `total_score`
 - `decision`: `PASS` / `NEEDS_REWRITE` / `NEEDS_USER_INPUT`
 
-质量门控采用五维加权：结构完整性 `25%`、证据贴合度 `25%`、内容具体性 `20%`、可继续编辑成熟度 `15%`、低风险 `15%`。其中低风险在代码中由 `(1 - risk_score)` 计入总分。`QUALITY_PASS_SCORE=0.70` 表示“合格可编辑初稿”的通过线，不代表最终可直接提交。该模块定位是自动质量门控，不是完全客观的最终评测；项目支持通过独立 evaluator 模型和更严格的审稿 prompt 降低生成器自评虚高风险，并结合章节完整率、引用覆盖率、检索证据数量和占位符检测等本地信号辅助判断。质量结果会保存 evaluator 来源，前端质量卡片可显示“独立审稿模型评分”或“默认审稿器评分”。
+质量门控采用五维加权：结构完整性 `25%`、证据贴合度 `25%`、内容具体性 `20%`、可继续编辑成熟度 `15%`、低风险 `15%`。其中低风险在代码中由 `(1 - risk_score)` 计入总分。`QUALITY_PASS_SCORE=0.85` 表示“合格可编辑初稿”的通过线，不代表最终可直接提交。该模块定位是自动质量门控，不是完全客观的最终评测；项目支持通过独立 evaluator 模型和更严格的审稿 prompt 降低生成器自评虚高风险，并结合章节完整率、检索证据数量和占位符检测等本地信号辅助判断。质量结果会保存 evaluator 来源，前端质量卡片可显示“独立审稿模型评分”或“默认审稿器评分”。
 
 ## RAG 设计
 
 本项目不是通用知识库 RAG，而是 **Assignment-scoped RAG / 任务级临时资料库 RAG**。
+
+![HW-assistant 课程作业 RAG + Agent 工作流流程图](docs/assets/rag-workflow-overview.png)
 
 ```text
 assignment_1 -> collection: assignment_1
@@ -120,7 +124,7 @@ ChromaDB cosine vector search
   ↓
 Parent-Child 上下文合并
   ↓
-Hybrid Score = vector score + keyword / section / filename signals
+Qwen3-Rerank + Hybrid Score = rerank score + vector / keyword / section / filename signals
   ↓
 Top-K 原文证据进入报告生成 prompt
 ```
@@ -210,7 +214,12 @@ EVALUATOR_API_KEY=
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=text-embedding-v2
 DASHSCOPE_API_KEY=your_dashscope_api_key
-QUALITY_PASS_SCORE=0.70
+QUALITY_PASS_SCORE=0.85
+RERANK_ENABLED=true
+RERANK_MODEL=qwen3-rerank
+RERANK_API_KEY=
+RERANK_CANDIDATE_MULTIPLIER=6
+RERANK_TIMEOUT_SECONDS=30
 ```
 
 `EVALUATOR_*` 可选；不配置时质量审稿回退使用默认生成模型。配置后，报告质量卡片会显示独立审稿模型来源。
@@ -301,14 +310,17 @@ Agent：
 
 ## Eval Harness
 
-评测脚本位于 `agent-python/evals`，支持离线统计：
+评测脚本位于 `agent-python/evals`，支持离线统计与 baseline / rerank 对照实验：
 
 - `Skill Routing Accuracy`
 - `Recall@k`
 - `MRR`
 - `Section Completeness`
+- `Hit Rate@5`
+- `Unsupported Claim Rate`
 - `Citation / Evidence Coverage`
 - `Rewrite Trigger Rate`
+- `Baseline vs Qwen3-Rerank Comparison`
 
 示例：
 
@@ -317,7 +329,13 @@ cd agent-python
 python evals/eval_harness.py evals/sample_results.jsonl --k 5
 ```
 
-如果要测 `Hit Rate@5` / `Recall@5`，需要准备小规模人工标注的 gold 集，例如 `gold_chunk_ids`、`gold_sections` 或 `gold_materials`。建议先做 20-50 条，用当前检索 top-10/top-20 辅助人工标注即可。后续可以继续探索 claim-evidence 评估、二次检索和更严格的本地一致性校验，进一步减少模型自评虚高。
+当前 hard eval 数据集包含 20 条人工设计 case，覆盖实验报告、论文总结、课程问答与动态规划任务。Qwen3-Rerank 对照实验结果：
+
+- `Hit Rate@5`：baseline `50%` -> rerank `85%`
+- `Unsupported Claim Rate`：baseline `39.8%` -> rerank `35.3%`
+- miss -> hit case：`7`，hit -> miss case：`0`
+
+如果要扩展评测集，可以继续在 `agent-python/tests/fixtures/rag_eval/cases.json` 中补充样本，并把对应材料放到 `agent-python/tests/fixtures/rag_eval/materials/`。
 
 ## 项目结构
 
@@ -334,7 +352,8 @@ python evals/eval_harness.py evals/sample_results.jsonl --k 5
 │   └── tests/
 ├── docs/
 │   └── assets/
-│       └── workflow-overview.png
+│       ├── workflow-overview.png
+│       └── rag-workflow-overview.png
 ├── docker-compose.yml
 ├── AGENTS.md
 ├── ROADMAP.md
@@ -343,7 +362,7 @@ python evals/eval_harness.py evals/sample_results.jsonl --k 5
 
 ## 适合写进简历的描述
 
-> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding 和 ChromaDB，实现作业级隔离 RAG、结构化资料索引、Multi-Query Retrieval、Parent-Child Retrieval、Hybrid Score 轻量重排、Skill Routing、动态报告规划、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计。
+> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding、Qwen3-Rerank 和 ChromaDB，实现作业级隔离 RAG、结构化资料索引、Multi-Query Retrieval、Parent-Child Retrieval、Hybrid Score 轻量重排、Skill Routing、动态报告规划、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计；在 20 条 hard eval case 上，rerank 将 Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 39.8% 降至 35.3%。
 
 ## 安全说明
 

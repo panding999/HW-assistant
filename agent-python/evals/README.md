@@ -43,6 +43,84 @@ From `agent-python`:
 python evals/eval_harness.py evals/sample_results.jsonl --k 5
 ```
 
+## Run Fixture RAG Hit Rate@5
+
+From the repository root, start ChromaDB with Docker Compose and run the fixture evaluation:
+
+```powershell
+cd "D:\HW Assistant"
+$env:DOCKER_CONFIG=(Resolve-Path .docker-config).Path
+docker compose up -d chromadb
+
+python -m venv agent-python\.venv
+agent-python\.venv\Scripts\python.exe -m pip install -r agent-python\requirements.txt
+agent-python\.venv\Scripts\python.exe agent-python\evals\eval_rag_hit_rate.py
+```
+
+The script reads:
+
+```text
+agent-python/tests/fixtures/rag_eval/cases.json
+```
+
+It writes:
+
+```text
+agent-python/eval-results/rag_hit_rate_latest.json
+agent-python/eval-results/rag_hit_rate_YYYYMMDD_HHMMSS.json
+```
+
+## Run Fixture Unsupported Claim Rate
+
+This evaluation generates reports first, then uses the configured evaluator model to extract concrete claims and judge whether each claim is supported by retrieved evidence.
+
+From the repository root:
+
+```powershell
+cd "D:\HW Assistant"
+
+agent-python\.venv\Scripts\python.exe agent-python\evals\eval_unsupported_claim_rate.py
+```
+
+To test one case first:
+
+```powershell
+agent-python\.venv\Scripts\python.exe agent-python\evals\eval_unsupported_claim_rate.py --limit 1
+```
+
+The script writes:
+
+```text
+agent-python/eval-results/unsupported_claim_rate_latest.json
+agent-python/eval-results/unsupported_claim_rate_YYYYMMDD_HHMMSS.json
+```
+
+## Run Baseline vs Qwen3-Rerank Comparison
+
+From the repository root:
+
+```powershell
+cd "D:\HW Assistant"
+
+$env:RERANK_ENABLED="false"
+agent-python\.venv\Scripts\python.exe agent-python\evals\eval_rag_hit_rate.py --label baseline
+agent-python\.venv\Scripts\python.exe agent-python\evals\eval_unsupported_claim_rate.py --label baseline
+
+$env:RERANK_ENABLED="true"
+$env:RERANK_MODEL="qwen3-rerank"
+agent-python\.venv\Scripts\python.exe agent-python\evals\eval_rag_hit_rate.py --label qwen3_rerank
+agent-python\.venv\Scripts\python.exe agent-python\evals\eval_unsupported_claim_rate.py --label qwen3_rerank
+
+agent-python\.venv\Scripts\python.exe agent-python\evals\compare_rerank_results.py
+```
+
+The comparison script writes:
+
+```text
+agent-python/eval-results/rerank_comparison_latest.json
+agent-python/eval-results/rerank_comparison_YYYYMMDD_HHMMSS.json
+```
+
 ## Export Real Task Data
 
 After the Java backend has generated reports, you can export task JSON from the API

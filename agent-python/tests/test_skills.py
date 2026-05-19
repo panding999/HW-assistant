@@ -56,13 +56,16 @@ class SkillRoutingTests(unittest.TestCase):
         self.assertIn("研究背景", prompt)
         self.assertIn("汇报提纲", prompt)
 
-    def test_build_search_queries_returns_three_chinese_queries(self) -> None:
+    def test_build_search_queries_returns_five_chinese_queries(self) -> None:
         payload = ReportRequest(assignment_id=1, title="图像分类实验", course="计算机视觉", description="实现 CNN 并分析结果")
         skill, _ = resolve_skill(payload)
         queries = build_search_queries(payload, skill)
-        self.assertEqual([item.name for item in queries], ["assignment_query", "skill_query", "section_query"])
-        self.assertEqual(len(queries), 3)
-        self.assertTrue(all("：" in item.text for item in queries))
+        self.assertEqual(
+            [item.name for item in queries],
+            ["assignment_query", "skill_query", "section_query", "plan_query", "keyword_query"],
+        )
+        self.assertEqual(len(queries), 5)
+        self.assertTrue(all(item.text.strip() for item in queries))
 
 
 if __name__ == "__main__":

@@ -381,6 +381,10 @@ public class AgentWorkflowService {
             improvePayload.put("skill_id", effectiveSkillId(assignment));
             improvePayload.put("top_k", 8);
             improvePayload.put("current_markdown", report.getMarkdown());
+            Map<String, Object> currentQuality = latestQualityMetricsBefore(assignment.getId(), taskId);
+            if (currentQuality != null) {
+                improvePayload.put("current_quality", currentQuality);
+            }
 
             currentStage = "improve";
             taskLogService.push(taskId, "generate", "RUNNING", "正在结合当前草稿和最新资料生成候选优化稿。");
@@ -490,6 +494,26 @@ public class AgentWorkflowService {
         return value instanceof List<?> list ? list.size() : 0;
     }
 
+    private Map<String, Object> latestQualityMetricsBefore(Long assignmentId, Long taskId) {
+        AgentTask previous = taskMapper.selectOne(
+                Wrappers.<AgentTask>lambdaQuery()
+                        .eq(AgentTask::getAssignmentId, assignmentId)
+                        .lt(AgentTask::getId, taskId)
+                        .isNotNull(AgentTask::getQualityMetricsJson)
+                        .orderByDesc(AgentTask::getId)
+                        .last("LIMIT 1")
+        );
+        if (previous == null || previous.getQualityMetricsJson() == null || previous.getQualityMetricsJson().isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(previous.getQualityMetricsJson(), Map.class);
+        } catch (JsonProcessingException ex) {
+            log.warn("quality_metrics_parse_failed taskId={} message={}", previous.getId(), ex.getMessage());
+            return null;
+        }
+    }
+
     private String qualityNote(Object quality) {
         if (quality instanceof Map<?, ?> qualityMap) {
             Object note = qualityMap.get("quality_note");
@@ -497,10 +521,8 @@ public class AgentWorkflowService {
                 return String.valueOf(note);
             }
             double sectionCompleteness = doubleValue(qualityMap, "section_completeness", 0);
-            double citationCoverage = doubleValue(qualityMap, "citation_coverage", 0);
             int retrievedChunks = (int) doubleValue(qualityMap, "retrieved_chunks", 0);
             return "质量检查完成：章节完整率 " + String.format("%.0f%%", sectionCompleteness * 100)
-                    + "，引用覆盖率 " + String.format("%.0f%%", citationCoverage * 100)
                     + "，检索片段 " + retrievedChunks + " 个。";
         }
         return "质量检查完成。";

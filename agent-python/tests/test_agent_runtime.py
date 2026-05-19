@@ -679,7 +679,7 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(calculate_citation_coverage("结论。[chunk_id: 10-0 | source: 实验要求.pdf]", evidence), 1.0)
 
     def test_quality_pass_score_default_matches_env_example(self) -> None:
-        self.assertEqual(quality_pass_score(), 0.70)
+        self.assertEqual(quality_pass_score(), 0.85)
 
     def test_model_total_score_is_recomputed_from_dimensions(self) -> None:
         review = type(

@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 public class MonitoringService {
     private static final Logger log = LoggerFactory.getLogger(MonitoringService.class);
     private static final String GENERATE_REPORT = "GENERATE_REPORT";
+    private static final String IMPROVE_REPORT = "IMPROVE_REPORT";
 
     private final AssignmentMapper assignmentMapper;
     private final MaterialMapper materialMapper;
@@ -58,7 +59,7 @@ public class MonitoringService {
         List<Report> reports = reportMapper.selectList(null);
         List<AgentTask> tasks = taskMapper.selectList(
                 Wrappers.<AgentTask>lambdaQuery()
-                        .eq(AgentTask::getType, GENERATE_REPORT)
+                        .in(AgentTask::getType, List.of(GENERATE_REPORT, IMPROVE_REPORT))
                         .orderByDesc(AgentTask::getCreatedAt)
         );
 

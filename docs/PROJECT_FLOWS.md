@@ -1,4 +1,4 @@
-# 项目流程梳理与面试讲解稿
+﻿# 项目流程梳理与面试讲解稿
 
 ## 项目定位
 
@@ -161,7 +161,7 @@ section_query = 必要章节 + 作业要求
 - 不输出 `以下是`、`改写版`、`最小必要修补版` 等元说明。
 - 不主动输出 `待补充`、`资料不足`、`TODO`、`TBD` 等占位符。
 - 使用资料时添加 `[来源: filename]` 形式的来源标注。
-- 也支持更精确的 `[来源: filename#chunk_id]` 或 `[chunk_id: id]` 标注，便于后续计算引用覆盖率。
+- 也支持更精确的 `[来源: filename#chunk_id]` 或 `[chunk_id: id]` 标注，便于后续做证据定位和 claim-evidence 评测。
 
 面试讲法：
 
@@ -177,7 +177,7 @@ section_query = 必要章节 + 作业要求
 - RAG 检索证据。
 - 本地信号：
   - 章节完整率。
-  - 引用覆盖信号。
+  - 证据片段数与证据贴合信号。
   - 检索片段数。
   - 草稿长度。
 
@@ -195,9 +195,9 @@ section_query = 必要章节 + 作业要求
 - 系统不直接信任模型返回的 `total_score`，而是按本地权重重算总分，避免模型自报总分过高。
 - 当前权重为：结构 25%、证据贴合 25%、具体性 20%、可编辑成熟度 15%、低风险 15%。
 
-引用覆盖率：
-- 只统计明确引用标记，如 `[来源: 实验要求.pdf]`、`[来源: 实验要求.pdf#10-0]`、`[chunk_id: 10-0]`。
-- 不再因为正文碰巧出现文件名或 chunk id 就算作引用命中。
+证据支撑信号：
+- 前端不再展示“引用覆盖率”，避免用户误解为报告质量本身。
+- 离线评测中用 `Unsupported Claim Rate` 衡量生成断言是否被检索证据支持。
 
 系统输出：
 - `total_score`
@@ -217,7 +217,7 @@ section_query = 必要章节 + 作业要求
 - 其他情况返回 `NEEDS_REWRITE`。
 
 当前阈值：
-- `QUALITY_PASS_SCORE=0.70`，语义是“合格可编辑初稿”的通过线，不表示最终可直接提交。
+- `QUALITY_PASS_SCORE=0.85`，语义是“合格可编辑初稿”的通过线，不表示最终可直接提交。
 
 面试讲法：
 
@@ -338,17 +338,17 @@ section_query = 必要章节 + 作业要求
 项目里有 `agent-python/evals/eval_harness.py`，用于离线评估 JSONL 结果。
 
 支持指标：
-- `recall_at_k`
-- `mrr`
+- `hit_rate_at_5`
+- `unsupported_claim_rate`
 - `skill_routing_accuracy`
 - `section_completeness`
 - `groundedness`
-- `citation_coverage`
 - `rewrite_trigger_rate`
+- `rerank_comparison`
 
 面试讲法：
 
-> 我准备了一个轻量评测框架，把在线任务结果导出为 JSONL 后，可以离线计算检索召回、路由准确率、章节完整率和引用覆盖率。这样可以支撑简历中的量化指标，而不是完全凭感觉描述。
+> 我准备了一个轻量评测框架，可以离线计算 Hit Rate@5、Unsupported Claim Rate、路由准确率、章节完整率和改写触发率，并支持 baseline 与 Qwen3-Rerank 对照实验。当前 20 条 hard case 中，rerank 将 Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 39.8% 降到 35.3%。
 
 ## 项目亮点排序
 

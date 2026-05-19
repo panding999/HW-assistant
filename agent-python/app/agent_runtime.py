@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
+from app.rerank import rerank_candidate_multiplier, rerank_enabled, rerank_evidence, rerank_model
+
 
 QUALITY_DECISION_PASS = "PASS"
 QUALITY_DECISION_REWRITE = "NEEDS_REWRITE"
@@ -28,6 +30,8 @@ class RetrievedEvidence(BaseModel):
     vector_score: float | None = None
     keyword_score: float | None = None
     hybrid_score: float | None = None
+    rerank_score: float | None = None
+    rerank_model: str = ""
     document_summary: str = ""
     document_outline: str = ""
     section_summary: str = ""
@@ -46,6 +50,11 @@ class SearchResult(BaseModel):
     raw_hits: int
     deduped_hits: int
     parent_merged_hits: int = 0
+    rerank_enabled: bool = False
+    rerank_model: str = ""
+    rerank_candidates: int = 0
+    rerank_applied: bool = False
+    rerank_failed_reason: str = ""
 
 
 class AgentTraceStep(BaseModel):
@@ -191,6 +200,11 @@ def run_report_agent(
             "deduped_hits": search_result.deduped_hits,
             "parent_merged_hits": search_result.parent_merged_hits,
             "retrieved": len(evidence),
+            "rerank_enabled": search_result.rerank_enabled,
+            "rerank_model": search_result.rerank_model,
+            "rerank_candidates": search_result.rerank_candidates,
+            "rerank_applied": search_result.rerank_applied,
+            "rerank_failed_reason": search_result.rerank_failed_reason,
         },
     )
     logger.info(
@@ -323,6 +337,7 @@ def improve_report_agent(
     collection: Any,
     query: str | list[SearchQuery],
     current_markdown: str,
+    current_quality: QualityMetrics | None = None,
     embed_texts: Callable[[list[str]], list[list[float]]],
     llm_client: Callable[[], Any],
     normalize_markdown: Callable[[str], str],
@@ -383,6 +398,11 @@ def improve_report_agent(
             "deduped_hits": search_result.deduped_hits,
             "parent_merged_hits": search_result.parent_merged_hits,
             "retrieved": len(evidence),
+            "rerank_enabled": search_result.rerank_enabled,
+            "rerank_model": search_result.rerank_model,
+            "rerank_candidates": search_result.rerank_candidates,
+            "rerank_applied": search_result.rerank_applied,
+            "rerank_failed_reason": search_result.rerank_failed_reason,
         },
     )
 
@@ -409,6 +429,7 @@ def improve_report_agent(
         output_summary=f"current_score={baseline_quality.total_score:.0%}; {baseline_quality.quality_note}",
         started=started,
     )
+    display_baseline_quality = current_quality or baseline_quality
 
     started = time.perf_counter()
     candidate_markdown = build_improved_report_draft(
@@ -489,11 +510,12 @@ def improve_report_agent(
         final_markdown = best_candidate_markdown
         final_quality = best_candidate_quality
         draft_version_reason = (
-            f"再次优化已采纳：质量分从 {baseline_quality.total_score:.0%} "
+            f"再次优化已采纳：质量分从 {display_baseline_quality.total_score:.0%} "
             f"提升到 {final_quality.total_score:.0%}。"
         )
         compare_summary = (
             f"accepted_improvement=true; baseline_score={baseline_quality.total_score:.0%}; "
+            f"display_baseline_score={display_baseline_quality.total_score:.0%}; "
             f"candidate_score={final_quality.total_score:.0%}"
         )
     else:
@@ -501,10 +523,11 @@ def improve_report_agent(
         final_quality = baseline_quality
         draft_version_reason = (
             f"本次优化未采纳：候选稿评分 {best_candidate_quality.total_score:.0%} "
-            f"未高于当前草稿 {baseline_quality.total_score:.0%}，已保留用户当前草稿。"
+            f"未高于当前草稿 {display_baseline_quality.total_score:.0%}，已保留用户当前草稿。"
         )
         compare_summary = (
             f"accepted_improvement=false; baseline_score={baseline_quality.total_score:.0%}; "
+            f"display_baseline_score={display_baseline_quality.total_score:.0%}; "
             f"candidate_score={best_candidate_quality.total_score:.0%}; kept_current=true"
         )
     record(
@@ -542,9 +565,11 @@ def search_materials(
     query_embeddings = embed_texts([item.text for item in queries])
     if not query_embeddings:
         return SearchResult(evidence=[], query_count=0, raw_hits=0, deduped_hits=0)
+    use_rerank = rerank_enabled()
+    n_results = max(top_k * (rerank_candidate_multiplier() if use_rerank else 2), top_k)
     results = collection.query(
         query_embeddings=query_embeddings,
-        n_results=max(top_k * 2, top_k),
+        n_results=n_results,
         include=["documents", "metadatas", "distances"],
     )
     documents_by_query = normalize_result_lists(results.get("documents"), len(queries))
@@ -597,11 +622,21 @@ def search_materials(
             if existing is None or candidate_score > existing_score:
                 by_chunk_id[chunk_id] = candidate
 
-    evidence = sorted(
+    ranked_evidence = sorted(
         by_chunk_id.values(),
         key=lambda item: item.hybrid_score if item.hybrid_score is not None else -1.0,
         reverse=True,
-    )[:top_k]
+    )
+    rerank_applied = False
+    rerank_failed_reason = ""
+    if use_rerank and ranked_evidence:
+        try:
+            rerank_query = "\n\n".join(item.text for item in queries)
+            ranked_evidence = rerank_evidence(rerank_query, ranked_evidence)
+            rerank_applied = True
+        except Exception as exc:
+            rerank_failed_reason = str(exc)
+    evidence = ranked_evidence[:top_k]
     parent_merged_hits = len({item.parent_id for item in by_chunk_id.values() if item.parent_id})
     return SearchResult(
         evidence=evidence,
@@ -610,6 +645,11 @@ def search_materials(
         raw_hits=raw_hits,
         deduped_hits=len(by_chunk_id),
         parent_merged_hits=parent_merged_hits,
+        rerank_enabled=use_rerank,
+        rerank_model=rerank_model() if use_rerank else "",
+        rerank_candidates=len(ranked_evidence) if use_rerank else 0,
+        rerank_applied=rerank_applied,
+        rerank_failed_reason=rerank_failed_reason,
     )
 
 
@@ -1120,8 +1160,6 @@ def decide_quality(
         return QUALITY_DECISION_USER_INPUT
     if not evidence and (total_score < 0.55 or len(text) < 600):
         return QUALITY_DECISION_USER_INPUT
-    if section_completeness < 1.0:
-        return QUALITY_DECISION_REWRITE
     if manual_review_reason:
         return QUALITY_DECISION_REWRITE
     if total_score >= pass_score:
@@ -1183,9 +1221,9 @@ def calculate_citation_coverage(markdown: str, evidence: list[RetrievedEvidence]
 
 def quality_pass_score() -> float:
     try:
-        return clamp01(float(os.getenv("QUALITY_PASS_SCORE", "0.70")))
+        return clamp01(float(os.getenv("QUALITY_PASS_SCORE", "0.85")))
     except ValueError:
-        return 0.70
+        return 0.85
 
 
 def extract_citations(markdown: str) -> set[str]:

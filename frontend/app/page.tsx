@@ -191,6 +191,7 @@ export default function HomePage() {
   const [taskHistory, setTaskHistory] = useState<AgentTask[]>([]);
   const [activeTask, setActiveTask] = useState<AgentTask | null>(null);
   const [reportMode, setReportMode] = useState<"preview" | "edit">("preview");
+  const [qualityPanelExpanded, setQualityPanelExpanded] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null);
@@ -889,7 +890,18 @@ export default function HomePage() {
                   <span className="rounded-full bg-white px-2.5 py-1 text-slate-600 shadow-sm dark:bg-slate-950 dark:text-slate-300">阈值 {formatPercent(latestQuality.pass_score ?? 0)}</span>
                   <span className={`rounded-full px-2.5 py-1 font-medium ${qualityDecisionClass(latestQuality.decision)}`}>{statusText(latestQuality.decision || "NEEDS_REWRITE")}</span>
                   {latestQuality.rewrite_triggered && <span className="rounded-full bg-rose-50 px-2.5 py-1 text-rose-700">已触发自动改写</span>}
+                  <button
+                    type="button"
+                    className="ml-auto inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 shadow-sm transition hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300 dark:hover:text-slate-100"
+                    aria-expanded={qualityPanelExpanded}
+                    onClick={() => setQualityPanelExpanded((value) => !value)}
+                  >
+                    <ChevronRight className={`transition-transform ${qualityPanelExpanded ? "rotate-90" : ""}`} size={14} />
+                    {qualityPanelExpanded ? "收起详情" : "展开详情"}
+                  </button>
                 </div>
+                {qualityPanelExpanded && (
+                  <>
                 <p className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
                   {qualityEvaluatorLabel(latestQuality)}
                 </p>
@@ -903,6 +915,8 @@ export default function HomePage() {
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-moss-800">建议：{latestQuality.rewrite_focus.join("；")}</p>
                 )}
                 {latestTask?.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{latestTask.draftVersionReason}</p>}
+                  </>
+                )}
               </div>
             )}
             {reportMode === "edit" ? (
@@ -988,7 +1002,7 @@ export default function HomePage() {
             </div>
             <div className="space-y-3 px-5 py-4">
               <input className="field" placeholder="作业标题" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
-              <input className="field" placeholder="课程名称，例如：字节ai全栈挑战赛" value={draft.course} onChange={(event) => setDraft({ ...draft, course: event.target.value })} />
+              <input className="field" placeholder="课程名称" value={draft.course} onChange={(event) => setDraft({ ...draft, course: event.target.value })} />
               <div>
                 <div className="mb-1 flex items-center justify-between">
                   <span className="block text-xs font-medium text-slate-600">任务类型</span>
@@ -1139,12 +1153,12 @@ export default function HomePage() {
         </div>
       )}
       {isDetailOpen && selected && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-sm" onClick={() => setIsDetailOpen(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 py-4 backdrop-blur-sm sm:py-6" onClick={() => setIsDetailOpen(false)}>
           <div
-            className="w-full max-w-lg overflow-hidden rounded-xl border border-white/70 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+            className="flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-white/70 bg-white shadow-2xl sm:max-h-[calc(100vh-3rem)] dark:border-slate-700 dark:bg-slate-900"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="border-b border-slate-100 bg-gradient-to-br from-moss-50 to-white px-5 py-4 dark:border-slate-800 dark:from-slate-900 dark:to-slate-900">
+            <div className="shrink-0 border-b border-slate-100 bg-gradient-to-br from-moss-50 to-white px-5 py-4 dark:border-slate-800 dark:from-slate-900 dark:to-slate-900">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] text-moss-700">PROJECT DETAIL</p>
@@ -1160,7 +1174,7 @@ export default function HomePage() {
                 </button>
               </div>
             </div>
-            <div className="space-y-4 px-5 py-4">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
               <div className="grid gap-3 sm:grid-cols-2">
                 <InfoItem label="截止时间" value={formatDue(selected.dueAt)} tone={isOverdue(selected.dueAt) ? "red" : "default"} />
                 <InfoItem label="资料数量" value={`${materials.length} 条`} />
@@ -1203,9 +1217,8 @@ export default function HomePage() {
                         </div>
                       )}
                       {latestQuality && (
-                        <div className="grid grid-cols-3 gap-2 text-xs">
+                        <div className="grid grid-cols-2 gap-2 text-xs">
                           <InfoPill label="质量分" value={formatPercent(latestQuality.total_score ?? 0)} />
-                          <InfoPill label="引用覆盖" value={formatPercent(latestQuality.citation_coverage ?? 0)} />
                           <InfoPill label="证据片段" value={`${latestQuality.retrieved_chunks ?? latestEvidence.length}`} />
                         </div>
                       )}

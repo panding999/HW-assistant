@@ -63,6 +63,7 @@ class ReportRequest(BaseModel):
 
 class ImproveReportRequest(ReportRequest):
     current_markdown: str = Field(min_length=1)
+    current_quality: QualityMetrics | None = None
 
 
 class ReportResponse(BaseModel):
@@ -867,6 +868,7 @@ def improve_report(payload: ImproveReportRequest) -> ReportResponse:
         collection=collection,
         query=queries,
         current_markdown=payload.current_markdown,
+        current_quality=payload.current_quality,
         embed_texts=embed_texts,
         llm_client=llm_client,
         quality_llm_client=evaluator_client,

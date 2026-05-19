@@ -1,0 +1,822 @@
+[
+  {
+    "case_id": "case_001",
+    "assignment_id": 9001,
+    "title": "排序算法性能对比实验报告",
+    "course": "数据结构",
+    "description": "根据实验资料，比较冒泡排序、快速排序和归并排序在不同输入规模下的时间表现，并分析复杂度差异。",
+    "skill_id": "lab_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900101,
+        "filename": "sort_algorithm_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_001/sort_algorithm_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900102,
+        "filename": "binary_search_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_001/binary_search_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900103,
+        "filename": "graph_traversal_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_001/graph_traversal_lab.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "sort_algorithm_lab.md",
+        "section_title": "实验结果",
+        "must_contain": [
+          "快速排序",
+          "归并排序",
+          "冒泡排序",
+          "10000"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_002",
+    "assignment_id": 9002,
+    "title": "图像分割算法实验报告",
+    "course": "计算机视觉",
+    "description": "完成阈值分割、K-means 分割和 GrabCut 分割的对比实验，说明评价指标和失败样例。",
+    "skill_id": "lab_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900201,
+        "filename": "image_segmentation_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_002/image_segmentation_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900202,
+        "filename": "edge_detection_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_002/edge_detection_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900203,
+        "filename": "object_detection_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_002/object_detection_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "image_segmentation_lab.md",
+        "section_title": "评价指标与结果",
+        "must_contain": [
+          "IoU",
+          "K-means",
+          "GrabCut",
+          "0.74"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_003",
+    "assignment_id": 9003,
+    "title": "MySQL 索引优化实验报告",
+    "course": "数据库系统",
+    "description": "围绕订单查询 SQL，比较无索引、单列索引和联合索引的执行计划与耗时。",
+    "skill_id": "lab_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900301,
+        "filename": "mysql_index_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_003/mysql_index_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900302,
+        "filename": "mysql_join_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_003/mysql_join_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900303,
+        "filename": "redis_cache_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_003/redis_cache_lab.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "mysql_index_lab.md",
+        "section_title": "执行计划对比",
+        "must_contain": [
+          "idx_user_status_time",
+          "rows",
+          "Using index condition",
+          "42 ms"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_004",
+    "assignment_id": 9004,
+    "title": "联邦学习论文阅读报告",
+    "course": "机器学习前沿",
+    "description": "阅读资料，总结 FedAvg 的研究背景、核心方法、实验设置和主要局限。",
+    "skill_id": "paper_summary",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900401,
+        "filename": "fedavg_reading.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_004/fedavg_reading.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900402,
+        "filename": "split_learning_reading.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_004/split_learning_reading.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900403,
+        "filename": "secure_aggregation_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_004/secure_aggregation_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "fedavg_reading.md",
+        "section_title": "核心方法",
+        "must_contain": [
+          "本地 SGD",
+          "参数平均",
+          "通信轮次",
+          "非独立同分布"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_005",
+    "assignment_id": 9005,
+    "title": "图神经网络推荐论文总结",
+    "course": "推荐系统",
+    "description": "根据给定论文笔记，说明 LightGCN 为什么去掉特征变换和非线性激活，并总结实验结论。",
+    "skill_id": "paper_summary",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900501,
+        "filename": "lightgcn_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_005/lightgcn_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900502,
+        "filename": "ngcf_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_005/ngcf_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900503,
+        "filename": "matrix_factorization_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_005/matrix_factorization_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "lightgcn_notes.md",
+        "section_title": "模型简化动机",
+        "must_contain": [
+          "特征变换",
+          "非线性激活",
+          "邻居聚合",
+          "协同过滤"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_006",
+    "assignment_id": 9006,
+    "title": "Transformer 压缩论文汇报",
+    "course": "自然语言处理",
+    "description": "总结知识蒸馏在 Transformer 压缩中的训练目标、压缩收益和可能损失。",
+    "skill_id": "paper_summary",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900601,
+        "filename": "transformer_distillation.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_006/transformer_distillation.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900602,
+        "filename": "quantization_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_006/quantization_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900603,
+        "filename": "pruning_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_006/pruning_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "transformer_distillation.md",
+        "section_title": "训练目标",
+        "must_contain": [
+          "软标签",
+          "隐藏层匹配",
+          "注意力矩阵",
+          "蒸馏损失"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_007",
+    "assignment_id": 9007,
+    "title": "操作系统内存管理问答",
+    "course": "操作系统",
+    "description": "回答分页、分段、TLB 和页面置换算法的区别，并举例说明缺页中断过程。",
+    "skill_id": "course_qa_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900701,
+        "filename": "os_memory_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_007/os_memory_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900702,
+        "filename": "process_scheduling_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_007/process_scheduling_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900703,
+        "filename": "file_system_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_007/file_system_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "os_memory_notes.md",
+        "section_title": "缺页中断流程",
+        "must_contain": [
+          "页表",
+          "磁盘",
+          "页面置换",
+          "重新执行指令"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_008",
+    "assignment_id": 9008,
+    "title": "TCP 拥塞控制课程问答",
+    "course": "计算机网络",
+    "description": "解释慢启动、拥塞避免、快速重传和快速恢复的触发条件与窗口变化。",
+    "skill_id": "course_qa_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900801,
+        "filename": "tcp_congestion_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_008/tcp_congestion_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900802,
+        "filename": "tcp_handshake_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_008/tcp_handshake_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900803,
+        "filename": "reliable_udp_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_008/reliable_udp_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "tcp_congestion_notes.md",
+        "section_title": "快速重传与快速恢复",
+        "must_contain": [
+          "三个重复 ACK",
+          "ssthresh",
+          "cwnd",
+          "快速恢复"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_009",
+    "assignment_id": 9009,
+    "title": "编译原理语法分析问答",
+    "course": "编译原理",
+    "description": "说明 LL(1) 与 LR 分析的区别，并根据课程资料解释 FIRST、FOLLOW 集的用途。",
+    "skill_id": "course_qa_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 900901,
+        "filename": "parser_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_009/parser_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900902,
+        "filename": "lexical_analysis_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_009/lexical_analysis_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 900903,
+        "filename": "semantic_analysis_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_009/semantic_analysis_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "parser_notes.md",
+        "section_title": "FIRST 与 FOLLOW",
+        "must_contain": [
+          "预测分析表",
+          "空串",
+          "同步符号",
+          "非终结符"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_010",
+    "assignment_id": 9010,
+    "title": "论文翻译与结构化报告",
+    "course": "智能系统安全",
+    "description": "翻译并总结 RAPID-FL 论文摘要和引言，重点说明安全聚合、边界样本和攻击检测的关系。",
+    "skill_id": "dynamic_planner",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901001,
+        "filename": "rapid_fl_translation_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_010/rapid_fl_translation_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901002,
+        "filename": "byzantine_fl_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_010/byzantine_fl_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901003,
+        "filename": "privacy_fl_translation.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_010/privacy_fl_translation.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "rapid_fl_translation_notes.md",
+        "section_title": "Abstract 关键句",
+        "must_contain": [
+          "RAPID-FL",
+          "边界样本",
+          "安全聚合",
+          "攻击检测"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_011",
+    "assignment_id": 9011,
+    "title": "校园跑腿 App 产品分析报告",
+    "course": "软件工程实践",
+    "description": "根据访谈资料和需求记录，设计一份包含用户画像、核心流程、风险点和迭代建议的产品分析报告。",
+    "skill_id": "dynamic_planner",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901101,
+        "filename": "campus_delivery_requirements.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_011/campus_delivery_requirements.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901102,
+        "filename": "campus_forum_requirements.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_011/campus_forum_requirements.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901103,
+        "filename": "canteen_ordering_requirements.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_011/canteen_ordering_requirements.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "campus_delivery_requirements.md",
+        "section_title": "风险与约束",
+        "must_contain": [
+          "虚假接单",
+          "隐私",
+          "押金",
+          "夜间配送"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_012",
+    "assignment_id": 9012,
+    "title": "智能温室课程设计综合报告",
+    "course": "物联网系统设计",
+    "description": "根据传感器记录、控制策略和测试结果，组织一份课程设计综合报告。",
+    "skill_id": "dynamic_planner",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901201,
+        "filename": "smart_greenhouse_design.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_012/smart_greenhouse_design.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901202,
+        "filename": "smart_classroom_design.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_012/smart_classroom_design.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901203,
+        "filename": "aquaculture_iot_design.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_012/aquaculture_iot_design.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "smart_greenhouse_design.md",
+        "section_title": "联动控制策略",
+        "must_contain": [
+          "土壤湿度",
+          "光照强度",
+          "水泵",
+          "遮阳帘"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_013",
+    "assignment_id": 9013,
+    "title": "阅读论文并总结隐私计算方法",
+    "course": "数据安全",
+    "description": "根据资料总结差分隐私和安全多方计算的区别、适用场景和局限。",
+    "skill_id": "AUTO",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901301,
+        "filename": "privacy_computing_survey.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_013/privacy_computing_survey.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901302,
+        "filename": "homomorphic_encryption_survey.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_013/homomorphic_encryption_survey.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901303,
+        "filename": "trusted_execution_survey.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_013/trusted_execution_survey.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "privacy_computing_survey.md",
+        "section_title": "方法对比",
+        "must_contain": [
+          "差分隐私",
+          "安全多方计算",
+          "噪声",
+          "通信开销"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_014",
+    "assignment_id": 9014,
+    "title": "卷积神经网络图像分类实验报告",
+    "course": "深度学习",
+    "description": "基于实验记录生成 CNN 图像分类实验报告，说明模型结构、训练设置和混淆矩阵结论。",
+    "skill_id": "AUTO",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901401,
+        "filename": "cnn_classification_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_014/cnn_classification_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901402,
+        "filename": "svm_classification_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_014/svm_classification_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901403,
+        "filename": "cnn_detection_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_014/cnn_detection_lab.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "cnn_classification_lab.md",
+        "section_title": "训练结果",
+        "must_contain": [
+          "验证准确率",
+          "混淆矩阵",
+          "猫",
+          "狗"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_015",
+    "assignment_id": 9015,
+    "title": "软件工程课堂问答整理",
+    "course": "软件工程",
+    "description": "回答瀑布模型、敏捷开发、持续集成和测试驱动开发的区别。",
+    "skill_id": "AUTO",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901501,
+        "filename": "software_engineering_qa.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_015/software_engineering_qa.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901502,
+        "filename": "project_management_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_015/project_management_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901503,
+        "filename": "devops_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_015/devops_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "software_engineering_qa.md",
+        "section_title": "敏捷与持续集成",
+        "must_contain": [
+          "短迭代",
+          "持续集成",
+          "自动化测试",
+          "反馈周期"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_016",
+    "assignment_id": 9016,
+    "title": "Web 安全漏洞复现实验报告",
+    "course": "网络安全",
+    "description": "根据实验记录，说明 SQL 注入、XSS 的复现步骤、危害和防护方案。",
+    "skill_id": "lab_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901601,
+        "filename": "web_security_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_016/web_security_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901602,
+        "filename": "csrf_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_016/csrf_lab.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901603,
+        "filename": "file_upload_lab.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_016/file_upload_lab.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "web_security_lab.md",
+        "section_title": "SQL 注入复现",
+        "must_contain": [
+          "' OR '1'='1",
+          "参数化查询",
+          "登录绕过",
+          "users"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_017",
+    "assignment_id": 9017,
+    "title": "大模型幻觉检测论文阅读报告",
+    "course": "自然语言处理前沿",
+    "description": "总结基于检索证据的大模型幻觉检测方法，包括 claim 分解、证据匹配和判定标签。",
+    "skill_id": "paper_summary",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901701,
+        "filename": "hallucination_detection_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_017/hallucination_detection_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901702,
+        "filename": "rag_evaluation_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_017/rag_evaluation_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901703,
+        "filename": "fact_checking_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_017/fact_checking_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "hallucination_detection_notes.md",
+        "section_title": "判定流程",
+        "must_contain": [
+          "claim 分解",
+          "证据匹配",
+          "supported",
+          "unsupported"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_018",
+    "assignment_id": 9018,
+    "title": "软件测试方法课程问答",
+    "course": "软件质量保证",
+    "description": "解释等价类划分、边界值分析、白盒测试和覆盖率指标的区别。",
+    "skill_id": "course_qa_report",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901801,
+        "filename": "software_testing_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_018/software_testing_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901802,
+        "filename": "performance_testing_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_018/performance_testing_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901803,
+        "filename": "unit_testing_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_018/unit_testing_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "software_testing_notes.md",
+        "section_title": "黑盒测试设计",
+        "must_contain": [
+          "等价类划分",
+          "边界值分析",
+          "有效等价类",
+          "无效等价类"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_019",
+    "assignment_id": 9019,
+    "title": "低代码平台调研综合报告",
+    "course": "企业信息系统",
+    "description": "整合资料，形成低代码平台的技术架构、适用场景、风险和选型建议。",
+    "skill_id": "dynamic_planner",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 901901,
+        "filename": "low_code_platform_survey.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_019/low_code_platform_survey.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901902,
+        "filename": "rpa_platform_survey.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_019/rpa_platform_survey.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 901903,
+        "filename": "workflow_engine_survey.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_019/workflow_engine_survey.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "low_code_platform_survey.md",
+        "section_title": "风险与治理",
+        "must_contain": [
+          "影子 IT",
+          "权限边界",
+          "版本管理",
+          "供应商锁定"
+        ]
+      }
+    ]
+  },
+  {
+    "case_id": "case_020",
+    "assignment_id": 9020,
+    "title": "数据可视化课程材料总结",
+    "course": "数据可视化",
+    "description": "根据课堂材料，总结折线图、柱状图、散点图和热力图的适用场景与误用风险。",
+    "skill_id": "AUTO",
+    "top_k": 5,
+    "materials": [
+      {
+        "id": 902001,
+        "filename": "visualization_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_020/visualization_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 902002,
+        "filename": "dashboard_design_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_020/dashboard_design_notes.md",
+        "content_type": "text/markdown"
+      },
+      {
+        "id": 902003,
+        "filename": "map_visualization_notes.md",
+        "path": "agent-python/tests/fixtures/rag_eval/materials/case_020/map_visualization_notes.md",
+        "content_type": "text/markdown"
+      }
+    ],
+    "gold_evidence": [
+      {
+        "filename": "visualization_notes.md",
+        "section_title": "图表选择原则",
+        "must_contain": [
+          "折线图",
+          "柱状图",
+          "散点图",
+          "热力图"
+        ]
+      }
+    ]
+  }
+]

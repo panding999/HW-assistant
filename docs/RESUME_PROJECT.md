@@ -1,6 +1,6 @@
 # 简历项目描述
 
-## AI 作业报告生成与质量监控系统
+## HW-assistant 智能作业报告生成与评测平台
 
 后端开发 / Agent 应用
 
@@ -10,7 +10,7 @@
 
 ### 技术栈
 
-Spring Boot 3、Java 21、MyBatis Plus、MySQL、SSE、FastAPI、ChromaDB、DeepSeek、DashScope Embedding、Docker Compose、Next.js
+Spring Boot 3、Java 21、MyBatis Plus、MySQL、Redis、SSE、FastAPI、ChromaDB、DeepSeek、DashScope Embedding、Qwen3-Rerank、Docker Compose、Next.js
 
 ### 核心功能
 
@@ -20,12 +20,14 @@ Spring Boot 3、Java 21、MyBatis Plus、MySQL、SSE、FastAPI、ChromaDB、Deep
 
 - 设计并实现 Agent 生成工作流，将一次报告生成拆分为资料索引、任务类型识别、RAG 检索、报告生成、质量检查、自动改写、结果落库等阶段；后端通过独立异步 Runner 调度任务，通过 SSE 推送阶段日志，并持久化 Trace、检索证据、质量评分和改写采纳结果，提升生成过程的可解释性。
 
-- 搭建基于 ChromaDB 的 assignment-scoped RAG 检索链路，按作业维度隔离并重建向量索引，避免历史资料残留导致召回污染；支持 PDF / Markdown / TXT 结构化切分、全文摘要、章节摘要、Parent-Child Retrieval、Multi-Query Retrieval 和 cosine + keyword 的轻量 Hybrid Score 重排，从作业信息、Skill、章节、报告计划和关键词五路构造 query，按 `chunk_id` 去重后取 Top-K 原文证据入上下文。
+- 搭建基于 ChromaDB 的 assignment-scoped RAG 检索链路，按作业维度隔离并重建向量索引，避免历史资料残留导致召回污染；支持 PDF / Markdown / TXT 结构化切分、全文摘要、章节摘要、Parent-Child Retrieval、Multi-Query Retrieval、Qwen3-Rerank 和 cosine + keyword 的轻量 Hybrid Score 重排，从作业信息、Skill、章节、报告计划和关键词五路构造 query，按 `chunk_id` 去重后取 Top-K 原文证据入上下文。
 
 - 设计任务类型识别机制，结合规则路由与 LLM 路由识别论文总结、实验报告、课程问答和动态规划等生成策略，并将路由原因、置信度和匹配结果以中文日志展示，降低 Agent 黑盒感，便于用户理解系统为何选择当前生成流程。
 
-- 实现 Workflow 编排下的独立质量审稿与自动改写机制，生成/规划/改写使用主模型链路，质量审稿可单独配置 evaluator 模型；围绕结构完整性、证据贴合度、表达具体性、可编辑成熟度和低风险五个维度进行加权审稿，总分由本地规则重算，并结合章节完整率、引用覆盖率、检索证据数量和占位符检测缓解模型自评虚高。低于阈值时触发一次最小必要改写，改写后重新评分，仅采纳不低于初稿质量的版本，避免“越改越差”。
+- 实现 Workflow 编排下的独立质量审稿与自动改写机制，生成/规划/改写使用主模型链路，质量审稿可单独配置 evaluator 模型；围绕结构完整性、证据贴合度、表达具体性、可编辑成熟度和低风险五个维度进行加权审稿，总分由本地规则重算，并结合章节完整率、检索证据数量和占位符检测缓解模型自评虚高。低于阈值时触发一次最小必要改写，改写后重新评分，仅采纳不低于初稿质量的版本，避免“越改越差”。
+
+- 构建 20 条 hard eval case 评测集，覆盖实验报告、论文总结、课程问答和动态规划任务；完成 baseline 与 Qwen3-Rerank 对照实验，`Hit Rate@5` 从 `50%` 提升到 `85%`，`Unsupported Claim Rate` 从 `39.8%` 降至 `35.3%`，验证 rerank 对证据召回和生成可靠性的改善。
 
 - 实现草稿再次优化链路：用户编辑报告或新增资料后，系统先保存当前草稿，再把当前草稿、原始草稿、检索证据和质量反馈一起交给 Agent 生成新草稿；新草稿评分更低时保留原稿并向用户说明原因，降低人工编辑成果被低质量改写覆盖的风险。
 
-- 构建报告生成监控看板，统计任务完成率、质量通过率、自动改写触发率、改写采纳率、平均耗时、P95 耗时、平均检索片段数和任务类型分布等指标；测试样本中端到端平均生成耗时约 79s，P95 耗时约 132s，可定位主要耗时集中在模型生成、质量检查与自动改写阶段。
+- 构建报告生成监控看板，统计任务完成率、质量通过率、自动改写触发率、改写采纳率、平均耗时、P95 耗时、平均检索片段数和任务类型分布等指标；当前样本中端到端平均任务耗时约 `92.7s`，P95 耗时约 `143s`，RAG 检索平均约 `628ms`，平均检索片段数 `5.9`，可定位主要耗时集中在模型生成、质量检查与自动改写阶段。
