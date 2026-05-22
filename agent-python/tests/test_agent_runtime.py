@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.agent_runtime import QualityMetrics, RetrievedEvidence, SearchQuery, calculate_citation_coverage, decide_quality, evaluate_quality, improve_report_agent, manual_review_reason_for, model_quality_score, quality_pass_score, run_report_agent, search_materials, should_rewrite
+from app.agent_runtime import QualityMetrics, RetrievedEvidence, SearchQuery, build_supplemental_queries, calculate_citation_coverage, decide_quality, evaluate_quality, improve_report_agent, manual_review_reason_for, model_quality_score, quality_pass_score, run_report_agent, search_materials, should_refine_retrieval, should_rewrite
 
 
 class FakeCollection:
@@ -60,6 +60,28 @@ class HybridParentCollection:
                 },
             ]],
             "distances": [[0.9, 0.01]],
+        }
+
+
+class RepairCollection:
+    def __init__(self, include_new_evidence=True):
+        self.include_new_evidence = include_new_evidence
+        self.calls = 0
+
+    def query(self, query_embeddings, n_results, include):
+        self.calls += 1
+        if self.calls == 1 or not self.include_new_evidence:
+            return {
+                "ids": [["10-0"]],
+                "documents": [["lab purpose content"]],
+                "metadatas": [[{"material_id": 10, "filename": "requirements.md"}]],
+                "distances": [[0.25]],
+            }
+        return {
+            "ids": [["20-0"]],
+            "documents": [["lab steps evidence with concrete implementation process"]],
+            "metadatas": [[{"material_id": 20, "filename": "steps.md"}]],
+            "distances": [[0.05]],
         }
 
 
@@ -192,6 +214,71 @@ class FakeChat:
 class FakeClient:
     def __init__(self):
         self.chat = FakeChat()
+
+
+class AgenticRepairCompletions:
+    def __init__(self):
+        self.quality_calls = 0
+        self.generation_calls = 0
+
+    def create(self, **kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        if '"scores"' in prompt:
+            self.quality_calls += 1
+            if self.quality_calls == 1:
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "scores": {
+                                "structure": 0.5,
+                                "grounding": 0.35,
+                                "specificity": 0.45,
+                                "readiness": 0.45,
+                                "risk": 0.55,
+                            },
+                            "review_summary": "steps section lacks evidence",
+                            "issues": ["steps section lacks supporting evidence"],
+                            "rewrite_focus": ["add evidence for lab steps"],
+                            "decision_hint": "NEEDS_REWRITE",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "scores": {
+                            "structure": 1.0,
+                            "grounding": 0.9,
+                            "specificity": 0.88,
+                            "readiness": 0.86,
+                            "risk": 0.08,
+                        },
+                        "review_summary": "repair retrieval improved evidence and structure",
+                        "issues": [],
+                        "rewrite_focus": [],
+                        "decision_hint": "PASS",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        self.generation_calls += 1
+        if self.generation_calls == 1:
+            return FakeResponse("# Purpose\nInitial draft only has purpose. [source: requirements.md]")
+        return FakeResponse(
+            "# Purpose\nRepair retrieval adds purpose detail. [source: requirements.md]\n\n"
+            "# Steps\nRepair retrieval adds concrete steps. [source: steps.md]"
+        )
+
+
+class AgenticRepairChat:
+    def __init__(self):
+        self.completions = AgenticRepairCompletions()
+
+
+class AgenticRepairClient:
+    def __init__(self):
+        self.chat = AgenticRepairChat()
 
 
 class WorseRewriteChat:
@@ -467,10 +554,135 @@ class AgentRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result.retrieved_evidence[0].chunk_id, "10-0")
         self.assertGreaterEqual(len(result.agent_trace), 4)
-        self.assertLessEqual(len(result.agent_trace), 4)
+        self.assertLessEqual(len(result.agent_trace), 6)
         self.assertTrue(result.quality.rewrite_triggered)
         self.assertEqual(result.quality.decision, "PASS")
         self.assertTrue(all(step.duration_ms >= 1 for step in result.agent_trace))
+
+    def test_agentic_rag_does_not_reflect_when_initial_quality_passes(self) -> None:
+        generator_calls = RecordingCompletions("generator")
+        evaluator_calls = RecordingCompletions("evaluator")
+        result = run_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=FakeCollection(),
+            query="query",
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+            llm_client=lambda: RecordingClient(generator_calls),
+            quality_llm_client=lambda: RecordingClient(evaluator_calls),
+            build_prompt=lambda payload, skill, context: context,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+
+        self.assertEqual(result.quality.decision, "PASS")
+        self.assertNotIn("reflect_retrieval_needs", [step.tool_name for step in result.agent_trace])
+
+    def test_event_sink_receives_each_trace_step_as_it_is_recorded(self) -> None:
+        client = FakeClient()
+        events = []
+        result = run_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=FakeCollection(),
+            query="query",
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+            llm_client=lambda: client,
+            build_prompt=lambda payload, skill, context: context,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+            event_sink=events.append,
+        )
+
+        self.assertEqual([event.step_index for event in events], [step.step_index for step in result.agent_trace])
+        self.assertEqual([event.tool_name for event in events], [step.tool_name for step in result.agent_trace])
+
+    def test_should_refine_retrieval_triggers_for_low_grounding_or_missing_sections(self) -> None:
+        low_grounding = QualityMetrics(
+            section_completeness=1.0,
+            citation_coverage=0.2,
+            retrieved_chunks=1,
+            rewrite_triggered=False,
+            grounding_score=0.35,
+            total_score=0.55,
+            pass_score=0.85,
+            decision="NEEDS_REWRITE",
+            issues=["evidence is insufficient"],
+            rewrite_focus=["add source evidence"],
+            quality_note="needs repair",
+        )
+        self.assertTrue(should_refine_retrieval(low_grounding, []))
+
+        pass_quality = low_grounding.copy(update={"decision": "PASS", "grounding_score": 0.9})
+        self.assertFalse(should_refine_retrieval(pass_quality, []))
+
+        user_input_quality = low_grounding.copy(update={"decision": "NEEDS_USER_INPUT"})
+        self.assertFalse(should_refine_retrieval(user_input_quality, []))
+
+    def test_build_supplemental_queries_includes_section_grounding_and_focus_queries(self) -> None:
+        quality = QualityMetrics(
+            section_completeness=0.5,
+            citation_coverage=0.2,
+            retrieved_chunks=1,
+            rewrite_triggered=False,
+            grounding_score=0.35,
+            total_score=0.55,
+            pass_score=0.85,
+            decision="NEEDS_REWRITE",
+            issues=["Steps section lacks evidence"],
+            rewrite_focus=["Add evidence for lab steps"],
+            quality_note="needs repair",
+        )
+        queries = build_supplemental_queries(FakePayload(), FakeSkill(), quality, "")
+        names = {item.name for item in queries}
+        joined = "\n".join(item.text for item in queries)
+        self.assertIn("repair_section_query", names)
+        self.assertIn("repair_grounding_query", names)
+        self.assertIn("repair_focus_query", names)
+        self.assertIn("Add evidence for lab steps", joined)
+
+    def test_agentic_rag_retrieves_again_and_accepts_better_candidate(self) -> None:
+        client = AgenticRepairClient()
+        collection = RepairCollection(include_new_evidence=True)
+        result = run_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=collection,
+            query="query",
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+            llm_client=lambda: client,
+            build_prompt=lambda payload, skill, context: context,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+
+        self.assertEqual(collection.calls, 2)
+        self.assertIn("Repair retrieval adds concrete steps", result.markdown)
+        self.assertEqual({item.chunk_id for item in result.retrieved_evidence}, {"10-0", "20-0"})
+        self.assertIn("reflect_retrieval_needs", [step.tool_name for step in result.agent_trace])
+        self.assertIn("search_materials_repair", [step.tool_name for step in result.agent_trace])
+        repair_quality = [step for step in result.agent_trace if step.tool_name == "check_repaired_quality"][0]
+        self.assertTrue(repair_quality.details["accepted_retrieval_repair"])
+
+    def test_agentic_rag_skips_regenerate_when_repair_search_has_no_new_evidence(self) -> None:
+        client = AgenticRepairClient()
+        collection = RepairCollection(include_new_evidence=False)
+        result = run_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=collection,
+            query="query",
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+            llm_client=lambda: client,
+            build_prompt=lambda payload, skill, context: context,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+
+        self.assertEqual(collection.calls, 2)
+        self.assertEqual(client.chat.completions.generation_calls, 2)
+        repair_search = [step for step in result.agent_trace if step.tool_name == "search_materials_repair"][0]
+        self.assertEqual(repair_search.details["new_evidence_count"], 0)
 
     def test_multi_query_search_deduplicates_and_limits_results(self) -> None:
         collection = MultiQueryCollection()
@@ -561,6 +773,73 @@ class AgentRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.markdown, current_markdown)
         self.assertIn("未采纳", result.draft_version_reason)
+        self.assertIn("accepted_improvement=false", result.agent_trace[-1].output_summary)
+
+    def test_improve_report_uses_saved_quality_as_baseline_when_available(self) -> None:
+        client = WorseImproveClient()
+        previous_quality = QualityMetrics(
+            section_completeness=1.0,
+            citation_coverage=0.5,
+            retrieved_chunks=8,
+            rewrite_triggered=False,
+            grounding_score=0.75,
+            total_score=0.78,
+            pass_score=0.85,
+            decision="NEEDS_REWRITE",
+            quality_note="历史保存评分 78%。",
+        )
+        result = improve_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=FakeCollection(),
+            query="query",
+            current_markdown="# 实验目的\n用户已补充完整依据。[来源: 实验要求.md]\n\n# 实验步骤\n用户已写清楚步骤。[来源: 实验要求.md]",
+            current_quality=previous_quality,
+            embed_texts=lambda texts: [[0.1, 0.2]],
+            llm_client=lambda: client,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+
+        self.assertIn("从 78% 提升到", result.draft_version_reason)
+        self.assertIn("baseline_score=78%", result.agent_trace[-1].output_summary)
+        self.assertIn("previous_saved_score=78%", result.agent_trace[-1].output_summary)
+        self.assertIn("comparison_score=78%", result.agent_trace[-1].output_summary)
+        self.assertIn("use_saved_current_quality", [step.tool_name for step in result.agent_trace])
+        self.assertNotIn("check_current_draft_quality", [step.tool_name for step in result.agent_trace])
+
+    def test_improve_report_uses_previous_saved_score_as_quality_floor(self) -> None:
+        client = BetterImproveClient()
+        previous_quality = QualityMetrics(
+            section_completeness=1.0,
+            citation_coverage=0.8,
+            retrieved_chunks=8,
+            rewrite_triggered=False,
+            grounding_score=0.9,
+            total_score=0.94,
+            pass_score=0.85,
+            decision="PASS",
+            quality_note="上一次已采纳稿评分 94%。",
+        )
+        current_markdown = "# 实验目的\n当前稿。[来源: 实验要求.md]\n\n# 实验步骤\n当前稿。"
+        result = improve_report_agent(
+            payload=FakePayload(),
+            skill=FakeSkill(),
+            collection=FakeCollection(),
+            query="query",
+            current_markdown=current_markdown,
+            current_quality=previous_quality,
+            embed_texts=lambda texts: [[0.1, 0.2]],
+            llm_client=lambda: client,
+            normalize_markdown=lambda text: text.strip(),
+            logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        )
+
+        self.assertEqual(result.markdown, current_markdown)
+        self.assertEqual(result.quality.total_score, 0.94)
+        self.assertIn("未采纳", result.draft_version_reason)
+        self.assertIn("previous_saved_score=94%", result.agent_trace[-1].output_summary)
+        self.assertIn("comparison_score=94%", result.agent_trace[-1].output_summary)
         self.assertIn("accepted_improvement=false", result.agent_trace[-1].output_summary)
 
     def test_improve_report_accepts_candidate_when_score_is_higher(self) -> None:

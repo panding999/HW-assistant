@@ -88,6 +88,8 @@ class QualityMetrics(BaseModel):
     quality_note: str
     evaluator_model: str = ""
     evaluator_mode: str = "fallback"
+    agentic_retrieval_triggered: bool = False
+    supplemental_retrieved_chunks: int = 0
 
 
 class AgentRunResult(BaseModel):
@@ -125,7 +127,8 @@ def run_report_agent(
     quality_llm_client: Callable[[], Any] | None = None,
     evaluator_model: str | None = None,
     evaluator_mode: str = "fallback",
-    max_steps: int = 5,
+    max_steps: int = 8,
+    event_sink: Callable[[AgentTraceStep], None] | None = None,
 ) -> AgentRunResult:
     trace: list[AgentTraceStep] = []
 
@@ -139,18 +142,19 @@ def run_report_agent(
         status: str = "SUCCEEDED",
         details: dict[str, Any] | None = None,
     ) -> None:
-        trace.append(
-            AgentTraceStep(
-                step_index=len(trace) + 1,
-                stage=stage,
-                tool_name=tool_name,
-                input_summary=input_summary,
-                output_summary=output_summary,
-                status=status,
-                duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                details=details or {},
-            )
+        step = AgentTraceStep(
+            step_index=len(trace) + 1,
+            stage=stage,
+            tool_name=tool_name,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            status=status,
+            duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
+            details=details or {},
         )
+        trace.append(step)
+        if event_sink is not None:
+            event_sink(step)
 
     logger.info(
         "agent_loop_start assignment_id=%s skill=%s max_steps=%s",
@@ -259,6 +263,135 @@ def run_report_agent(
         quality.pass_score,
     )
 
+    if len(trace) < max_steps and should_refine_retrieval(quality, evidence):
+        started = time.perf_counter()
+        supplemental_queries = build_supplemental_queries(payload, skill, quality, report_plan)
+        reflection_reason = retrieval_reflection_reason(quality, evidence)
+        record(
+            stage="reflect",
+            tool_name="reflect_retrieval_needs",
+            input_summary=f"decision={quality.decision} score={quality.total_score:.0%}",
+            output_summary=reflection_reason,
+            started=started,
+            details={
+                "agentic_rag_enabled": True,
+                "reflection_reason": reflection_reason,
+                "supplemental_queries": [item.dict() for item in supplemental_queries],
+            },
+        )
+
+        started = time.perf_counter()
+        repair_search_result = search_materials(collection, supplemental_queries, payload.top_k, embed_texts)
+        merged_evidence, new_evidence_count = merge_evidence(evidence, repair_search_result.evidence)
+        record(
+            stage="retrieve_repair",
+            tool_name="search_materials_repair",
+            input_summary=f"top_k={payload.top_k} query_count={repair_search_result.query_count}",
+            output_summary=(
+                f"raw_hits={repair_search_result.raw_hits}; deduped={repair_search_result.deduped_hits}; "
+                f"new={new_evidence_count}; merged={len(merged_evidence)}"
+            ),
+            started=started,
+            details={
+                "agentic_rag_enabled": True,
+                "supplemental_queries": [item.dict() for item in supplemental_queries],
+                "new_evidence_count": new_evidence_count,
+                "merged_evidence_count": len(merged_evidence),
+                "per_query_counts": repair_search_result.per_query_counts,
+                "rerank_enabled": repair_search_result.rerank_enabled,
+                "rerank_model": repair_search_result.rerank_model,
+                "rerank_candidates": repair_search_result.rerank_candidates,
+                "rerank_applied": repair_search_result.rerank_applied,
+                "rerank_failed_reason": repair_search_result.rerank_failed_reason,
+            },
+        )
+
+        if new_evidence_count > 0 and len(trace) < max_steps:
+            repaired_context_text = evidence_context(merged_evidence)
+            original_repair_score = quality.total_score
+            started = time.perf_counter()
+            candidate_markdown = build_report_draft(
+                payload,
+                skill,
+                repaired_context_text,
+                llm_client,
+                build_prompt,
+                normalize_markdown,
+                report_plan,
+            )
+            record(
+                stage="regenerate",
+                tool_name="build_report_draft_repair",
+                input_summary=f"skill={skill.id} merged_evidence={len(merged_evidence)}",
+                output_summary=f"markdown_chars={len(candidate_markdown)}",
+                started=started,
+                details={
+                    "agentic_rag_enabled": True,
+                    "new_evidence_count": new_evidence_count,
+                    "merged_evidence_count": len(merged_evidence),
+                },
+            )
+
+            started = time.perf_counter()
+            candidate_quality = evaluate_quality(
+                candidate_markdown,
+                skill.required_sections,
+                merged_evidence,
+                rewrite_triggered=False,
+                llm_client=quality_client,
+                payload=payload,
+                skill=skill,
+                pass_score=pass_score,
+                evaluator_model=quality_model,
+                evaluator_mode=evaluator_mode,
+            )
+            accepted_retrieval_repair = candidate_quality.total_score > quality.total_score
+            if accepted_retrieval_repair:
+                markdown = candidate_markdown
+                evidence = merged_evidence
+                context_text = repaired_context_text
+                quality = candidate_quality.copy(
+                    update={
+                        "agentic_retrieval_triggered": True,
+                        "supplemental_retrieved_chunks": new_evidence_count,
+                    }
+                )
+                draft_version_reason = f"Agentic RAG 二次检索补充证据后采纳候选稿，当前评分 {quality.total_score:.0%}。"
+            else:
+                quality = quality.copy(
+                    update={
+                        "agentic_retrieval_triggered": True,
+                        "supplemental_retrieved_chunks": new_evidence_count,
+                    }
+                )
+            record(
+                stage="quality_repair",
+                tool_name="check_repaired_quality",
+                input_summary=f"sections={len(skill.required_sections)} merged_evidence={len(merged_evidence)}",
+                output_summary=(
+                    f"candidate_score={candidate_quality.total_score:.0%}; "
+                    f"original_score={original_repair_score:.0%}; "
+                    f"accepted_retrieval_repair={str(accepted_retrieval_repair).lower()}"
+                ),
+                started=started,
+                details={
+                    "agentic_rag_enabled": True,
+                    "new_evidence_count": new_evidence_count,
+                    "merged_evidence_count": len(merged_evidence),
+                    "accepted_retrieval_repair": accepted_retrieval_repair,
+                    "candidate_score": candidate_quality.total_score,
+                    "original_score": original_repair_score,
+                    "current_score": quality.total_score,
+                },
+            )
+        else:
+            quality = quality.copy(
+                update={
+                    "agentic_retrieval_triggered": True,
+                    "supplemental_retrieved_chunks": new_evidence_count,
+                }
+            )
+
     rewrite_needed = len(trace) < max_steps and should_rewrite(markdown, quality, evidence)
     draft_version_reason = (
         f"模型质量门控通过，评分 {quality.total_score:.0%}。"
@@ -346,6 +479,7 @@ def improve_report_agent(
     evaluator_model: str | None = None,
     evaluator_mode: str = "fallback",
     max_steps: int = 6,
+    event_sink: Callable[[AgentTraceStep], None] | None = None,
 ) -> AgentRunResult:
     trace: list[AgentTraceStep] = []
 
@@ -359,18 +493,19 @@ def improve_report_agent(
         status: str = "SUCCEEDED",
         details: dict[str, Any] | None = None,
     ) -> None:
-        trace.append(
-            AgentTraceStep(
-                step_index=len(trace) + 1,
-                stage=stage,
-                tool_name=tool_name,
-                input_summary=input_summary,
-                output_summary=output_summary,
-                status=status,
-                duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                details=details or {},
-            )
+        step = AgentTraceStep(
+            step_index=len(trace) + 1,
+            stage=stage,
+            tool_name=tool_name,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            status=status,
+            duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
+            details=details or {},
         )
+        trace.append(step)
+        if event_sink is not None:
+            event_sink(step)
 
     logger.info(
         "agent_improve_start assignment_id=%s skill=%s max_steps=%s",
@@ -409,27 +544,40 @@ def improve_report_agent(
     pass_score = quality_pass_score()
     quality_client = quality_llm_client or llm_client
     quality_model = evaluator_model or os.getenv("LLM_MODEL", "deepseek-v4-flash")
-    started = time.perf_counter()
-    baseline_quality = evaluate_quality(
-        current_markdown,
-        skill.required_sections,
-        evidence,
-        rewrite_triggered=False,
-        llm_client=quality_client,
-        payload=payload,
-        skill=skill,
-        pass_score=pass_score,
-        evaluator_model=quality_model,
-        evaluator_mode=evaluator_mode,
-    )
-    record(
-        stage="quality",
-        tool_name="check_current_draft_quality",
-        input_summary=f"current_chars={len(current_markdown)} evidence={len(evidence)}",
-        output_summary=f"current_score={baseline_quality.total_score:.0%}; {baseline_quality.quality_note}",
-        started=started,
-    )
-    display_baseline_quality = current_quality or baseline_quality
+    previous_saved_quality = current_quality
+    if previous_saved_quality is not None:
+        baseline_quality = previous_saved_quality
+        started = time.perf_counter()
+        record(
+            stage="quality",
+            tool_name="use_saved_current_quality",
+            input_summary=f"current_chars={len(current_markdown)} evidence={len(evidence)}",
+            output_summary=f"current_score={baseline_quality.total_score:.0%}; 使用上一版已保存质量分作为优化基准。",
+            started=started,
+            details={"baseline_source": "saved_quality"},
+        )
+    else:
+        started = time.perf_counter()
+        baseline_quality = evaluate_quality(
+            current_markdown,
+            skill.required_sections,
+            evidence,
+            rewrite_triggered=False,
+            llm_client=quality_client,
+            payload=payload,
+            skill=skill,
+            pass_score=pass_score,
+            evaluator_model=quality_model,
+            evaluator_mode=evaluator_mode,
+        )
+        record(
+            stage="quality",
+            tool_name="check_current_draft_quality",
+            input_summary=f"current_chars={len(current_markdown)} evidence={len(evidence)}",
+            output_summary=f"current_score={baseline_quality.total_score:.0%}; {baseline_quality.quality_note}",
+            started=started,
+            details={"baseline_source": "reevaluated_quality"},
+        )
 
     started = time.perf_counter()
     candidate_markdown = build_improved_report_draft(
@@ -506,16 +654,23 @@ def improve_report_agent(
         )
 
     started = time.perf_counter()
+    previous_score_summary = (
+        f"previous_saved_score={previous_saved_quality.total_score:.0%}; "
+        if previous_saved_quality else ""
+    )
+    comparison_score_summary = f"comparison_score={baseline_quality.total_score:.0%}; "
+
     if best_candidate_quality.total_score > baseline_quality.total_score:
         final_markdown = best_candidate_markdown
         final_quality = best_candidate_quality
         draft_version_reason = (
-            f"再次优化已采纳：质量分从 {display_baseline_quality.total_score:.0%} "
+            f"再次优化已采纳：质量分从 {baseline_quality.total_score:.0%} "
             f"提升到 {final_quality.total_score:.0%}。"
         )
         compare_summary = (
             f"accepted_improvement=true; baseline_score={baseline_quality.total_score:.0%}; "
-            f"display_baseline_score={display_baseline_quality.total_score:.0%}; "
+            f"{previous_score_summary}"
+            f"{comparison_score_summary}"
             f"candidate_score={final_quality.total_score:.0%}"
         )
     else:
@@ -523,11 +678,12 @@ def improve_report_agent(
         final_quality = baseline_quality
         draft_version_reason = (
             f"本次优化未采纳：候选稿评分 {best_candidate_quality.total_score:.0%} "
-            f"未高于当前草稿 {display_baseline_quality.total_score:.0%}，已保留用户当前草稿。"
+            f"未高于当前草稿 {baseline_quality.total_score:.0%}，已保留用户当前草稿。"
         )
         compare_summary = (
             f"accepted_improvement=false; baseline_score={baseline_quality.total_score:.0%}; "
-            f"display_baseline_score={display_baseline_quality.total_score:.0%}; "
+            f"{previous_score_summary}"
+            f"{comparison_score_summary}"
             f"candidate_score={best_candidate_quality.total_score:.0%}; kept_current=true"
         )
     record(
@@ -1143,6 +1299,143 @@ def should_rewrite(
     if quality.decision == QUALITY_DECISION_REWRITE:
         return True
     return False
+
+
+def should_refine_retrieval(
+    quality: QualityMetrics,
+    evidence: list[RetrievedEvidence],
+) -> bool:
+    if quality.decision != QUALITY_DECISION_REWRITE:
+        return False
+    if quality.manual_review_reason:
+        return False
+    if quality.grounding_score < 0.55:
+        return True
+    if quality.section_completeness < 1.0:
+        return True
+    if len(evidence) < 2 or quality.retrieved_chunks < 2:
+        return True
+    issue_text = " ".join([*quality.issues, *quality.rewrite_focus]).lower()
+    retrieval_markers = [
+        "evidence",
+        "source",
+        "citation",
+        "grounding",
+        "support",
+        "retriev",
+        "chunk",
+        "资料",
+        "证据",
+        "依据",
+        "来源",
+        "引用",
+        "支撑",
+        "检索",
+    ]
+    return any(marker in issue_text for marker in retrieval_markers)
+
+
+def build_supplemental_queries(
+    payload: Any,
+    skill: Any,
+    quality: QualityMetrics,
+    report_plan: str = "",
+) -> list[SearchQuery]:
+    base_parts = [
+        f"assignment title: {getattr(payload, 'title', '')}",
+        f"course: {getattr(payload, 'course', '') or ''}",
+        f"assignment description: {getattr(payload, 'description', '') or ''}",
+        f"skill: {getattr(skill, 'label', '') or getattr(skill, 'id', '')}",
+        f"query hint: {getattr(skill, 'query_hint', '') or ''}",
+    ]
+    base_text = "\n".join(part for part in base_parts if part.strip() and not part.endswith(": "))
+    required_sections = [str(section) for section in getattr(skill, "required_sections", []) if str(section).strip()]
+    focus_text = "\n".join([*quality.issues[:4], *quality.rewrite_focus[:4]])
+
+    queries: list[SearchQuery] = []
+    if quality.section_completeness < 1.0 and required_sections:
+        queries.append(
+            SearchQuery(
+                name="repair_section_query",
+                text="\n".join(
+                    [
+                        base_text,
+                        "Find missing or weak report section evidence.",
+                        "sections: " + " ".join(required_sections),
+                        report_plan.strip(),
+                    ]
+                ).strip(),
+            )
+        )
+    if quality.grounding_score < 0.65 or quality.citation_coverage < 0.5 or quality.retrieved_chunks < 2:
+        queries.append(
+            SearchQuery(
+                name="repair_grounding_query",
+                text="\n".join(
+                    [
+                        base_text,
+                        "Find source evidence, citations, concrete facts, implementation details, metrics, and supporting material.",
+                        focus_text,
+                    ]
+                ).strip(),
+            )
+        )
+    if focus_text.strip():
+        queries.append(
+            SearchQuery(
+                name="repair_focus_query",
+                text="\n".join(
+                    [
+                        base_text,
+                        "Quality issues and rewrite focus that need additional retrieval:",
+                        focus_text,
+                    ]
+                ).strip(),
+            )
+        )
+    if not queries:
+        queries.append(
+            SearchQuery(
+                name="repair_grounding_query",
+                text="\n".join([base_text, report_plan.strip(), focus_text]).strip(),
+            )
+        )
+    return normalize_search_queries(queries)
+
+
+def retrieval_reflection_reason(
+    quality: QualityMetrics,
+    evidence: list[RetrievedEvidence],
+) -> str:
+    reasons: list[str] = []
+    if quality.grounding_score < 0.55:
+        reasons.append(f"grounding_score={quality.grounding_score:.0%}")
+    if quality.section_completeness < 1.0:
+        reasons.append(f"section_completeness={quality.section_completeness:.0%}")
+    if len(evidence) < 2 or quality.retrieved_chunks < 2:
+        reasons.append(f"retrieved_chunks={len(evidence)}")
+    if quality.issues or quality.rewrite_focus:
+        reasons.append("quality_feedback_requires_more_evidence")
+    return "; ".join(reasons) or "quality gate requested retrieval repair"
+
+
+def merge_evidence(
+    original: list[RetrievedEvidence],
+    supplemental: list[RetrievedEvidence],
+) -> tuple[list[RetrievedEvidence], int]:
+    merged: list[RetrievedEvidence] = []
+    seen: set[str] = set()
+    original_ids = {item.chunk_id for item in original}
+    new_ids: set[str] = set()
+    for item in [*original, *supplemental]:
+        key = item.chunk_id
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+        if key not in original_ids:
+            new_ids.add(key)
+    return merged, len(new_ids)
 
 
 def decide_quality(

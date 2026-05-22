@@ -41,6 +41,7 @@ public class AgentWorkflowService {
     private final ReportMapper reportMapper;
     private final RestClient restClient;
     private final TaskLogService taskLogService;
+    private final AgentStreamEventProcessor agentStreamEventProcessor;
     private final ObjectMapper objectMapper;
 
     public AgentWorkflowService(
@@ -50,6 +51,7 @@ public class AgentWorkflowService {
             ReportMapper reportMapper,
             RestClient.Builder restClientBuilder,
             TaskLogService taskLogService,
+            AgentStreamEventProcessor agentStreamEventProcessor,
             ObjectMapper objectMapper,
             @Value("${agent.base-url}") String agentBaseUrl
     ) {
@@ -59,6 +61,7 @@ public class AgentWorkflowService {
         this.reportMapper = reportMapper;
         this.restClient = restClientBuilder.baseUrl(agentBaseUrl).build();
         this.taskLogService = taskLogService;
+        this.agentStreamEventProcessor = agentStreamEventProcessor;
         this.objectMapper = objectMapper;
     }
 
@@ -112,8 +115,13 @@ public class AgentWorkflowService {
         if (!"FAILED".equals(oldTask.getStatus())) {
             throw new IllegalArgumentException("Only failed tasks can be retried.");
         }
-        AgentTask task = createReportTask(oldTask.getAssignmentId());
-        return task;
+        if ("IMPROVE_REPORT".equals(oldTask.getType())) {
+            return createImproveReportTask(oldTask.getAssignmentId());
+        }
+        if ("GENERATE_REPORT".equals(oldTask.getType())) {
+            return createReportTask(oldTask.getAssignmentId());
+        }
+        throw new IllegalArgumentException("Unsupported task type for retry: " + oldTask.getType());
     }
 
     public void runReportTask(Long taskId) {
@@ -196,13 +204,13 @@ public class AgentWorkflowService {
             currentStage = "generate";
             taskLogService.push(taskId, "skill", "RUNNING", "正在识别任务类型并规划生成策略。");
             stageStarted = System.nanoTime();
-            Map<?, ?> reportResponse = restClient.post()
-                    .uri("/agent/generate-report")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .accept(MediaType.APPLICATION_JSON)
-                    .body(toJson(reportPayload))
-                    .retrieve()
-                    .body(Map.class);
+            AgentCallResult agentCall = callAgentWithStreamingFallback(
+                    taskId,
+                    "/agent/generate-report-stream",
+                    "/agent/generate-report",
+                    reportPayload
+            );
+            Map<?, ?> reportResponse = agentCall.response();
 
             Object markdownValue = reportResponse == null ? "" : reportResponse.get("markdown");
             String markdown = markdownValue == null ? "" : String.valueOf(markdownValue);
@@ -214,6 +222,21 @@ public class AgentWorkflowService {
             Object quality = reportResponse == null ? null : reportResponse.get("quality");
             Object agentTrace = reportResponse == null ? null : reportResponse.get("agent_trace");
             String draftVersionReason = valueOf(reportResponse, "draft_version_reason", "初稿已生成。");
+            Map<String, Object> previousQuality = latestQualityMetricsBefore(assignment.getId(), taskId);
+            boolean acceptedGeneratedDraft = true;
+            if (previousQuality != null && quality instanceof Map<?, ?> qualityMap) {
+                double previousScore = doubleValue(previousQuality, "total_score", -1.0);
+                double generatedScore = doubleValue(qualityMap, "total_score", -1.0);
+                if (previousScore >= 0 && generatedScore >= 0 && generatedScore <= previousScore) {
+                    acceptedGeneratedDraft = false;
+                    draftVersionReason = "本次重新生成未采纳：候选稿评分 "
+                            + formatScore(generatedScore)
+                            + " 未高于当前稿 "
+                            + formatScore(previousScore)
+                            + "，已保留原稿。";
+                    quality = previousQuality;
+                }
+            }
             int retrievedCount = listSize(retrievedEvidence);
             String qualityNote = qualityNote(quality);
             boolean rewriteTriggered = rewriteTriggered(quality);
@@ -229,7 +252,11 @@ public class AgentWorkflowService {
                     elapsedMs(stageStarted)
             );
 
-            upsertReport(assignment, markdown);
+            if (acceptedGeneratedDraft) {
+                upsertReport(assignment, markdown);
+            } else {
+                log.info("report_kept_after_generate assignmentId={} taskId={} reason={}", assignment.getId(), taskId, draftVersionReason);
+            }
             assignment.setResolvedSkillId(resolvedSkillId);
             assignment.setStatus("DONE");
             assignmentMapper.updateById(assignment);
@@ -251,13 +278,16 @@ public class AgentWorkflowService {
             }
 
             taskLogService.push(taskId, "skill", "SUCCEEDED", routingMessage(resolvedSkillId, routingMode, routingConfidence, routingReason));
+            if (!agentCall.streamed()) {
             taskLogService.push(taskId, "retrieve", "SUCCEEDED", "RAG 检索完成，命中 " + retrievedCount + " 个资料片段。");
             taskLogService.push(taskId, "generate", "SUCCEEDED", "已使用 " + skillLabel(resolvedSkillId) + " 生成草稿，可以开始编辑。");
             taskLogService.push(taskId, "quality", finalStatus, qualityNote);
             if (rewriteTriggered) {
                 taskLogService.push(taskId, "rewrite", finalStatus, draftVersionReason);
             }
-            taskLogService.push(taskId, "done", finalStatus, finalMessage(finalStatus));
+            }
+            taskLogService.push(taskId, "quality_final", finalStatus, qualityNote);
+            taskLogService.push(taskId, "done", finalStatus, draftVersionReason);
             log.info(
                     "report_task_done taskId={} assignmentId={} status={} durationMs={}",
                     taskId,
@@ -295,6 +325,42 @@ public class AgentWorkflowService {
             return objectMapper.writeValueAsString(payload);
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Failed to serialize Agent request.", ex);
+        }
+    }
+
+    private AgentCallResult callAgentWithStreamingFallback(
+            Long taskId,
+            String streamUri,
+            String fallbackUri,
+            Map<String, Object> payload
+    ) {
+        try {
+            Map<?, ?> streamedResponse = restClient.post()
+                    .uri(streamUri)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.valueOf("application/x-ndjson"))
+                    .body(toJson(payload))
+                    .exchange((request, response) -> {
+                        if (response.getStatusCode().isError()) {
+                            throw new IllegalStateException("Agent stream endpoint returned " + response.getStatusCode());
+                        }
+                        return agentStreamEventProcessor.readFinalResponse(
+                                response.getBody(),
+                                event -> taskLogService.push(taskId, event.stage(), event.status(), event.message())
+                        );
+                    });
+            return new AgentCallResult(streamedResponse, true);
+        } catch (Exception ex) {
+            log.warn("agent_stream_failed taskId={} streamUri={} fallbackUri={} errorType={} message={}",
+                    taskId, streamUri, fallbackUri, ex.getClass().getSimpleName(), ex.getMessage());
+            Map<?, ?> fallbackResponse = restClient.post()
+                    .uri(fallbackUri)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(toJson(payload))
+                    .retrieve()
+                    .body(Map.class);
+            return new AgentCallResult(fallbackResponse, false);
         }
     }
 
@@ -389,13 +455,13 @@ public class AgentWorkflowService {
             currentStage = "improve";
             taskLogService.push(taskId, "generate", "RUNNING", "正在结合当前草稿和最新资料生成候选优化稿。");
             stageStarted = System.nanoTime();
-            Map<?, ?> reportResponse = restClient.post()
-                    .uri("/agent/improve-report")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .accept(MediaType.APPLICATION_JSON)
-                    .body(toJson(improvePayload))
-                    .retrieve()
-                    .body(Map.class);
+            AgentCallResult agentCall = callAgentWithStreamingFallback(
+                    taskId,
+                    "/agent/improve-report-stream",
+                    "/agent/improve-report",
+                    improvePayload
+            );
+            Map<?, ?> reportResponse = agentCall.response();
 
             Object markdownValue = reportResponse == null ? "" : reportResponse.get("markdown");
             String markdown = markdownValue == null ? report.getMarkdown() : String.valueOf(markdownValue);
@@ -438,12 +504,15 @@ public class AgentWorkflowService {
             }
 
             taskLogService.push(taskId, "skill", "SUCCEEDED", routingMessage(resolvedSkillId, routingMode, routingConfidence, routingReason));
-            taskLogService.push(taskId, "retrieve", "SUCCEEDED", "RAG 检索完成，命中 " + retrievedCount + " 个最新资料片段。");
-            taskLogService.push(taskId, "generate", "SUCCEEDED", "已生成候选优化稿，并与当前草稿进行质量对比。");
-            taskLogService.push(taskId, "quality", finalStatus, qualityNote);
-            if (rewriteTriggered) {
-                taskLogService.push(taskId, "rewrite", finalStatus, draftVersionReason);
+            if (!agentCall.streamed()) {
+                taskLogService.push(taskId, "retrieve", "SUCCEEDED", "RAG 检索完成，命中 " + retrievedCount + " 个最新资料片段。");
+                taskLogService.push(taskId, "generate", "SUCCEEDED", "已生成候选优化稿，并与当前草稿进行质量对比。");
+                taskLogService.push(taskId, "quality", finalStatus, qualityNote);
+                if (rewriteTriggered) {
+                    taskLogService.push(taskId, "rewrite", finalStatus, draftVersionReason);
+                }
             }
+            taskLogService.push(taskId, "quality_final", finalStatus, qualityNote);
             taskLogService.push(taskId, "done", finalStatus, draftVersionReason);
             log.info(
                     "improve_task_done taskId={} assignmentId={} status={} durationMs={} reason={}",
@@ -555,6 +624,10 @@ public class AgentWorkflowService {
             case "NEEDS_USER_INPUT" -> "草稿已保存，但模型判断资料或任务信息不足，建议补充资料后再生成。";
             default -> "任务完成。";
         };
+    }
+
+    private String formatScore(double score) {
+        return String.format("%.0f%%", score * 100);
     }
 
     private long elapsedMs(long startedNanos) {
@@ -686,5 +759,8 @@ public class AgentWorkflowService {
             reportMapper.updateById(report);
             log.info("report_upserted assignmentId={} reportId={} version={}", assignment.getId(), report.getId(), report.getVersion());
         }
+    }
+
+    private record AgentCallResult(Map<?, ?> response, boolean streamed) {
     }
 }

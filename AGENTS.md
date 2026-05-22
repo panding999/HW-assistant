@@ -8,7 +8,7 @@ FZU Homework Assistant is a multi-module project:
 
 - `frontend/`: Next.js 14 workspace UI, report editor, task trace display, monitoring dashboard.
 - `backend-java/`: Spring Boot orchestration, MySQL persistence, file upload, SSE task logs.
-- `agent-python/`: FastAPI Agent runtime, assignment-scoped RAG, skill routing, quality gate, rewrite.
+- `agent-python/`: FastAPI Agent runtime, assignment-scoped RAG, skill routing, quality gate, repair retrieval, rewrite.
 - `docs/`: project notes and GitHub assets.
 
 Runtime data flow:
@@ -72,20 +72,34 @@ Current retrieval stack:
 - multi-query retrieval: assignment, skill, section, plan, keyword
 - parent-child context merge
 - lightweight hybrid score using vector and keyword/section/file signals
+- quality-feedback repair retrieval: at most one supplemental retrieval round when grounding is low, required sections are missing, or quality issues point to insufficient evidence
 
 ## Agent Loop
 
 Normal fixed skills:
 
 ```text
-search_materials -> build_report_draft -> check_report_quality -> rewrite_report(optional)
+search_materials -> build_report_draft -> check_report_quality
+-> retrieve_repair/regenerate(optional) -> rewrite_report(optional)
 ```
 
 Dynamic planner:
 
 ```text
-plan_report_outline -> search_materials -> build_report_draft -> check_report_quality -> rewrite_report(optional)
+plan_report_outline -> search_materials -> build_report_draft -> check_report_quality
+-> retrieve_repair/regenerate(optional) -> rewrite_report(optional)
 ```
+
+Streaming endpoints:
+
+- Prefer `/agent/generate-report-stream` and `/agent/improve-report-stream` from Java when available.
+- Stream format is NDJSON with `stage`, `final`, and `error` events.
+- Non-streaming endpoints remain required as fallback.
+
+Improve/version protection:
+
+- When improving an existing draft, use the previously saved quality score as the baseline if available.
+- Do not re-score the current draft just to establish the baseline, because evaluator scores can fluctuate across runs.
 
 Keep loop bounds explicit. Do not add open-ended autonomous loops.
 
@@ -115,4 +129,3 @@ Expected local endpoints:
 - Backend: http://localhost:8080
 - Agent docs: http://localhost:8000/docs
 - ChromaDB: http://localhost:8001
-

@@ -56,7 +56,8 @@ public class TaskLogService {
             for (AgentTaskLog log : history) {
                 emitter.send(SseEmitter.event().name("log").data(toMessage(log)));
             }
-        } catch (IOException ex) {
+        } catch (Exception ex) {
+            log.debug("task_log_subscribe_send_failed taskId={}", taskId, ex);
             removeEmitter(taskId, emitter);
         }
 
@@ -92,7 +93,8 @@ public class TaskLogService {
                 if ("FAILED".equals(status) || ("done".equals(stage) && isTerminalStatus(status))) {
                     emitter.complete();
                 }
-            } catch (IOException ex) {
+            } catch (Exception ex) {
+                TaskLogService.log.debug("task_log_push_send_failed taskId={} stage={} status={}", taskId, stage, status, ex);
                 removeEmitter(taskId, emitter);
             }
         }

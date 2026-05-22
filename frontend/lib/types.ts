@@ -71,6 +71,8 @@ export type AgentQualityMetrics = {
   quality_note?: string;
   evaluator_model?: string;
   evaluator_mode?: "independent" | "fallback" | string;
+  agentic_retrieval_triggered?: boolean;
+  supplemental_retrieved_chunks?: number;
 };
 
 export type RetrievedEvidence = {

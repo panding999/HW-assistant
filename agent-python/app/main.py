@@ -10,11 +10,13 @@ from typing import Iterable
 
 import chromadb
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from openai import APIConnectionError, APIError, OpenAI
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from app.agent_runtime import AgentRunResult, AgentTraceStep, QualityMetrics, RetrievedEvidence, SearchQuery, extract_keywords, improve_report_agent, run_report_agent
+from app.agent_streaming import stream_agent_events
 from app.skill_registry import AUTO_SKILL, SKILLS, VALID_SKILLS, SkillSpec
 
 
@@ -797,6 +799,18 @@ def delete_assignment_collection(assignment_id: int) -> DeleteCollectionResponse
 
 @app.post("/agent/generate-report", response_model=ReportResponse)
 def generate_report(payload: ReportRequest) -> ReportResponse:
+    return execute_generate_report(payload)
+
+
+@app.post("/agent/generate-report-stream")
+def generate_report_stream(payload: ReportRequest) -> StreamingResponse:
+    return StreamingResponse(
+        stream_agent_events(lambda event_sink: execute_generate_report(payload, event_sink=event_sink)),
+        media_type="application/x-ndjson",
+    )
+
+
+def execute_generate_report(payload: ReportRequest, event_sink=None) -> ReportResponse:
     logger.info(
         "generate_start assignment_id=%s requested_skill=%s top_k=%s",
         payload.assignment_id,
@@ -823,6 +837,7 @@ def generate_report(payload: ReportRequest) -> ReportResponse:
         build_prompt=build_prompt,
         normalize_markdown=normalize_markdown,
         logger=logger,
+        event_sink=event_sink,
     )
     logger.info(
         "generate_done assignment_id=%s skill=%s retrieved=%s rewritten=%s",
@@ -848,6 +863,18 @@ def generate_report(payload: ReportRequest) -> ReportResponse:
 
 @app.post("/agent/improve-report", response_model=ReportResponse)
 def improve_report(payload: ImproveReportRequest) -> ReportResponse:
+    return execute_improve_report(payload)
+
+
+@app.post("/agent/improve-report-stream")
+def improve_report_stream(payload: ImproveReportRequest) -> StreamingResponse:
+    return StreamingResponse(
+        stream_agent_events(lambda event_sink: execute_improve_report(payload, event_sink=event_sink)),
+        media_type="application/x-ndjson",
+    )
+
+
+def execute_improve_report(payload: ImproveReportRequest, event_sink=None) -> ReportResponse:
     logger.info(
         "improve_start assignment_id=%s requested_skill=%s top_k=%s current_chars=%s",
         payload.assignment_id,
@@ -876,6 +903,7 @@ def improve_report(payload: ImproveReportRequest) -> ReportResponse:
         evaluator_mode=evaluator_mode(),
         normalize_markdown=normalize_markdown,
         logger=logger,
+        event_sink=event_sink,
     )
     logger.info(
         "improve_done assignment_id=%s skill=%s retrieved=%s rewritten=%s reason=%s",

@@ -130,7 +130,11 @@ public class AssignmentController {
     @PostMapping("/tasks/{taskId}/retry")
     public AgentTask retryTask(@PathVariable Long taskId) {
         AgentTask task = agentWorkflowService.retryTask(taskId);
-        agentTaskRunner.runReportTask(task.getId());
+        if ("IMPROVE_REPORT".equals(task.getType())) {
+            agentTaskRunner.runImproveReportTask(task.getId());
+        } else {
+            agentTaskRunner.runReportTask(task.getId());
+        }
         return task;
     }
 

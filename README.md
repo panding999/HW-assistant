@@ -14,9 +14,10 @@
 - **Multi-Query Retrieval + Parent-Child Retrieval**：从作业描述、Skill、章节、报告计划、关键词 5 路构造 query；用 child chunk 精准命中，用 parent/section 上下文补足生成所需背景。
 - **Skill Routing + Dynamic Planner**：支持实验报告、论文总结、课程问答等固定业务 Skill；低置信度任务进入 `dynamic_planner`，先生成报告大纲 / 章节计划，再基于计划检索和生成正文。
 - **ReAct-lite Agent Loop**：Python Agent 按固定上限执行 `plan`、`retrieve`、`generate`、`quality`、`rewrite` 等步骤，避免无限循环，并输出完整 `agent_trace`。
+- **轻量 Agentic RAG 闭环**：质量门控发现证据不足、章节缺失或 grounding 偏低时，最多触发 1 轮补充检索，合并新证据后重生成候选稿并重新评估，只采纳质量更高版本。
 - **独立质量审稿**：从结构完整度、证据贴合度、具体性、可编辑成熟度、低风险五个维度审稿；支持单独配置 evaluator 模型，未配置时回退默认生成模型，降低生成器自评虚高风险。
-- **自动改写与再次优化**：低于阈值时自动改写一次，并保留评分更高版本；用户编辑草稿或新增资料后，可先保存当前版本，再和原草稿一起交给 Agent 生成新草稿，新稿低分时保留原稿并说明原因。
-- **端到端可观测性**：Java 后端保存路由结果、检索证据、质量指标和 Agent Trace；前端展示 SSE 阶段日志、Agent Trace、RAG Evidence 和监控指标。
+- **自动改写与版本保护**：低于阈值时自动改写一次，并保留评分更高版本；再次优化使用上一版已保存质量分作为 baseline，只评估候选稿，避免 evaluator 波动导致低质量稿覆盖原稿；重试失败任务时保留原始操作类型。
+- **端到端可观测性**：Python Agent 通过 NDJSON 流式回传逐阶段事件，Java 后端转发为 SSE 日志；前端展示中文化 AI 工作流、Agent Trace、RAG Evidence 和监控指标，并用定时刷新兜底避免收尾日志丢失。
 - **Docker 一键启动**：前端、后端、Agent、MySQL、Redis、ChromaDB 通过 `docker compose` 编排，方便本地演示和 GitHub 复现。
 
 ## 系统架构
@@ -44,31 +45,33 @@ ChromaDB + Generator LLM + Evaluator LLM(optional) + DashScope Embedding
 
 1. 用户创建作业，填写课程、标题、截止时间和任务说明。
 2. 用户上传 PDF / Markdown / TXT 资料。
-3. Java 后端创建异步 `AgentTask`，并通过 SSE 推送阶段日志。
+3. Java 后端创建异步 `AgentTask`，并通过 SSE 推送阶段日志；失败任务重试时保留原始任务类型。
 4. 后端调用 Python Agent `/agent/index`。
 5. Agent 删除并重建当前作业的 `assignment_{id}` collection。
 6. Agent 解析资料，结构化切分 chunk，生成全文摘要、章节摘要和关键词，并写入 ChromaDB。
-7. 后端调用 `/agent/generate-report`，Agent 执行 Skill Routing。
+7. 后端优先调用 `/agent/generate-report-stream` 或 `/agent/improve-report-stream`，Agent 逐阶段返回 NDJSON 事件；流式不可用时回退非流式接口。
 8. 如果进入 `dynamic_planner`，Agent 先生成报告大纲 / 章节计划。
 9. Agent 构造多路 query，执行 cosine 向量召回、父子上下文合并和 hybrid score 重排。
 10. Agent 基于全局摘要、章节摘要和 Top-K 原文证据生成 Markdown 草稿。
-11. 质量门控使用 evaluator 审稿，必要时自动改写一次，并保留更好版本。
+11. 质量门控使用 evaluator 审稿；若证据不足可触发一次补充检索，必要时自动改写一次，并保留更好版本。
 12. Java 后端保存报告、retrieved evidence、quality metrics 和 agent trace。
 13. 前端展示报告草稿、质量结果卡片、AI 工作流、RAG evidence 和数据监控指标。
-14. 用户编辑草稿或补充资料后，可点击“再次优化”：系统先保存当前草稿，再结合原草稿与最新资料生成新草稿，并通过同一质量门控做版本保护。
+14. 用户编辑草稿或补充资料后，可点击“再次优化”：系统先保存当前草稿，以上一版保存质量分作为 baseline，再结合当前草稿与最新资料生成候选稿；候选稿评分更低时保留原稿并说明原因。
 
 ## Agent Loop
 
 普通固定 Skill 的主要步骤：
 
 ```text
-search_materials -> build_report_draft -> check_report_quality -> rewrite_report(optional)
+search_materials -> build_report_draft -> check_report_quality
+-> retrieve_repair/regenerate(optional) -> rewrite_report(optional)
 ```
 
 `dynamic_planner` 会额外增加规划步骤：
 
 ```text
-plan_report_outline -> search_materials -> build_report_draft -> check_report_quality -> rewrite_report(optional)
+plan_report_outline -> search_materials -> build_report_draft -> check_report_quality
+-> retrieve_repair/regenerate(optional) -> rewrite_report(optional)
 ```
 
 每一步都会记录：
@@ -92,7 +95,7 @@ plan_report_outline -> search_materials -> build_report_draft -> check_report_qu
 - `total_score`
 - `decision`: `PASS` / `NEEDS_REWRITE` / `NEEDS_USER_INPUT`
 
-质量门控采用五维加权：结构完整性 `25%`、证据贴合度 `25%`、内容具体性 `20%`、可继续编辑成熟度 `15%`、低风险 `15%`。其中低风险在代码中由 `(1 - risk_score)` 计入总分。`QUALITY_PASS_SCORE=0.85` 表示“合格可编辑初稿”的通过线，不代表最终可直接提交。该模块定位是自动质量门控，不是完全客观的最终评测；项目支持通过独立 evaluator 模型和更严格的审稿 prompt 降低生成器自评虚高风险，并结合章节完整率、检索证据数量和占位符检测等本地信号辅助判断。质量结果会保存 evaluator 来源，前端质量卡片可显示“独立审稿模型评分”或“默认审稿器评分”。
+质量门控采用五维加权：结构完整性 `25%`、证据贴合度 `25%`、内容具体性 `20%`、可继续编辑成熟度 `15%`、低风险 `15%`。其中低风险在代码中由 `(1 - risk_score)` 计入总分。`QUALITY_PASS_SCORE=0.85` 表示“合格可编辑初稿”的通过线，不代表最终可直接提交。该模块定位是自动质量门控，不是完全客观的最终评测；项目支持通过独立 evaluator 模型和更严格的审稿 prompt 降低生成器自评虚高风险，并结合章节完整率、检索证据数量和占位符检测等本地信号辅助判断。质量结果会保存 evaluator 来源，前端质量卡片可显示“独立审稿模型评分”或“默认审稿器评分”。对于再次优化，系统优先使用上一版已保存质量分作为比较基准，避免同一原稿被重复评分时出现波动并影响版本采纳。
 
 ## RAG 设计
 
@@ -332,7 +335,7 @@ python evals/eval_harness.py evals/sample_results.jsonl --k 5
 当前 hard eval 数据集包含 20 条人工设计 case，覆盖实验报告、论文总结、课程问答与动态规划任务。Qwen3-Rerank 对照实验结果：
 
 - `Hit Rate@5`：baseline `50%` -> rerank `85%`
-- `Unsupported Claim Rate`：baseline `39.8%` -> rerank `35.3%`
+- `Unsupported Claim Rate`：baseline `29.8%` -> rerank `15.3%`
 - miss -> hit case：`7`，hit -> miss case：`0`
 
 如果要扩展评测集，可以继续在 `agent-python/tests/fixtures/rag_eval/cases.json` 中补充样本，并把对应材料放到 `agent-python/tests/fixtures/rag_eval/materials/`。
@@ -362,7 +365,7 @@ python evals/eval_harness.py evals/sample_results.jsonl --k 5
 
 ## 适合写进简历的描述
 
-> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding、Qwen3-Rerank 和 ChromaDB，实现作业级隔离 RAG、结构化资料索引、Multi-Query Retrieval、Parent-Child Retrieval、Hybrid Score 轻量重排、Skill Routing、动态报告规划、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计；在 20 条 hard eval case 上，rerank 将 Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 39.8% 降至 35.3%。
+> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding、Qwen3-Rerank 和 ChromaDB，实现作业级隔离 RAG、结构化资料索引、Multi-Query Retrieval、Parent-Child Retrieval、Hybrid Score 轻量重排、Skill Routing、动态报告规划、模型质量门控、自动改写和报告版本保存；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计；在 20 条 hard eval case 上，rerank 将 Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 29.8% 降至 15.3%。
 
 ## 安全说明
 

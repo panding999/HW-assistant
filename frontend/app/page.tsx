@@ -219,9 +219,9 @@ export default function HomePage() {
     () => assignments.find((assignment) => assignment.id === selectedId) ?? assignments[0],
     [assignments, selectedId]
   );
-  const visibleLogs = useMemo(() => latestStageLogs(logs), [logs]);
   const isDemo = selected?.id < 0;
   const latestTask = activeTask ?? taskHistory[0];
+  const visibleLogs = useMemo(() => latestStageLogs(logs, latestTask), [logs, latestTask]);
   const latestTrace = useMemo(() => parseJsonList<AgentTraceStep>(latestTask?.agentTraceJson), [latestTask?.agentTraceJson]);
   const latestEvidence = useMemo(() => parseJsonList<RetrievedEvidence>(latestTask?.retrievedEvidenceJson), [latestTask?.retrievedEvidenceJson]);
   const latestQuality = useMemo(() => parseJsonObject<AgentQualityMetrics>(latestTask?.qualityMetricsJson), [latestTask?.qualityMetricsJson]);
@@ -270,9 +270,23 @@ export default function HomePage() {
         setTimeout(() => void loadDetail(activeTask.assignmentId), 900);
       }
     });
-    source.onerror = () => source.close();
+    source.onerror = () => {
+      source.close();
+      setActiveTask(null);
+      setTimeout(() => void loadDetail(activeTask.assignmentId), 500);
+    };
     return () => source.close();
   }, [activeTask?.id]);
+
+  useEffect(() => {
+    if (!activeTask || activeTask.id < 0) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadDetail(activeTask.assignmentId);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeTask?.id, activeTask?.assignmentId]);
 
   async function refresh() {
     if (refreshInFlight.current) {
@@ -768,7 +782,7 @@ export default function HomePage() {
                           <p className="mt-1 text-xs text-slate-500">
                             阶段：{stageLabel(task.currentStage || "queued")} · 耗时：{formatDuration(task.startedAt, task.finishedAt)}
                           </p>
-                          {task.draftVersionReason && <p className="mt-1 line-clamp-1 text-xs text-slate-500">{task.draftVersionReason}</p>}
+                          {task.draftVersionReason && <p className="mt-1 line-clamp-1 text-xs text-slate-500">{formatDraftVersionReason(task)}</p>}
                         </div>
                       ))}
                     </div>
@@ -834,7 +848,7 @@ export default function HomePage() {
                       <StepIcon status={log.status} />
                       <div>
                         <p className="text-sm font-semibold text-slate-900">{stageLabel(log.stage)}</p>
-                        <p className="mt-1 text-xs leading-5 text-slate-500">{log.message}</p>
+                        <p className="mt-1 text-xs leading-5 text-slate-500">{formatLogMessage(log)}</p>
                       </div>
                       <span className="rounded-full bg-slate-50 px-2.5 py-0.5 text-xs text-slate-500">{statusText(log.status)}</span>
                     </div>
@@ -914,7 +928,7 @@ export default function HomePage() {
                 {latestQuality.rewrite_focus && latestQuality.rewrite_focus.length > 0 && (
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-moss-800">建议：{latestQuality.rewrite_focus.join("；")}</p>
                 )}
-                {latestTask?.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{latestTask.draftVersionReason}</p>}
+                {latestTask?.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{formatDraftVersionReason(latestTask)}</p>}
                   </>
                 )}
               </div>
@@ -1193,7 +1207,7 @@ export default function HomePage() {
                   </div>
                   <p className="text-xs leading-5 text-slate-500">阶段：{stageLabel(latestTask.currentStage || "queued")} · 耗时：{formatDuration(latestTask.startedAt, latestTask.finishedAt)}</p>
                   {latestTask.routingReason && <p className="mt-2 text-xs leading-5 text-slate-500">识别原因：{latestTask.routingReason}</p>}
-                  {latestTask.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{latestTask.draftVersionReason}</p>}
+                  {latestTask.draftVersionReason && <p className="mt-1 text-xs leading-5 text-slate-500">{formatDraftVersionReason(latestTask)}</p>}
                   {(latestTrace.length > 0 || latestEvidence.length > 0 || latestQuality) && (
                     <div className="mt-3 space-y-3">
                       {latestTrace.length > 0 && (
@@ -1599,27 +1613,208 @@ function qualityEvaluatorLabel(quality: AgentQualityMetrics) {
 }
 
 function stageLabel(stage: string) {
+  const agenticLabels: Record<string, string> = {
+    reflect: "补充检索判断",
+    retrieve_repair: "补充资料检索",
+    regenerate: "重新生成候选稿",
+    quality_repair: "补充后质量检查"
+  };
   const labels: Record<string, string> = {
     queued: "任务排队",
     skill: "任务类型识别",
     parse: "资料解析",
-    retrieve: "RAG 检索",
+    retrieve: "资料检索",
     generate: "生成报告草稿",
     quality: "质量检查",
+    quality_candidate: "候选稿质量检查",
+    quality_final: "最终质量结果",
     rewrite: "自动改写",
     compare: "质量对比",
     done: "完成",
     failed: "失败"
   };
-  return labels[stage] || stage;
+  return agenticLabels[stage] || labels[stage] || stage;
 }
 
-function latestStageLogs(logs: AgentTaskLog[]) {
+function formatLogMessage(log: AgentTaskLog) {
+  const message = log.message || "";
+  const fields = parseLogFields(message);
+  const stage = log.stage;
+
+  if ((stage === "retrieve" || stage === "retrieve_repair") && fields.raw_hits) {
+    const retrieved = fields.retrieved || fields.merged_evidence_count;
+    const parentText = fields.parents ? `，合并上下文后 ${fields.parents} 组` : "";
+    const retrievedText = retrieved ? `，最终选出 ${retrieved} 段证据` : "";
+    return `已检索 ${fields.raw_hits} 条候选片段，去重后 ${fields.deduped || fields.deduped_hits || "若干"} 条${parentText}${retrievedText}。`;
+  }
+
+  if (stage === "reflect") {
+    if (fields.agentic_rag_enabled === "true" || fields.needs_retrieval_repair === "true") {
+      return "质量检查发现证据或章节可能不足，已准备进行一次补充检索。";
+    }
+    return humanizeLogText(message);
+  }
+
+  if (stage === "generate" || stage === "regenerate") {
+    const chars = fields.candidate_chars || fields.markdown_chars;
+    if (chars) {
+      return stage === "regenerate"
+        ? `已结合补充证据重新生成候选稿，约 ${chars} 字符。`
+        : `已生成候选稿，约 ${chars} 字符。`;
+    }
+  }
+
+  if (stage === "quality" || stage === "quality_repair" || stage === "quality_final") {
+    const scoreEntry = [
+      ["current_score", "当前稿评分"],
+      ["candidate_score", "候选稿评分"],
+      ["rewrite_score", "改写稿评分"],
+      ["repair_score", "补充检索后评分"]
+    ].find(([key]) => fields[key]);
+    if (scoreEntry) {
+      const [key, label] = scoreEntry;
+      return `${label} ${fields[key]}；${humanizeLogText(stripLeadingField(message, key))}`;
+    }
+  }
+
+  if (stage === "rewrite" && fields.accepted_rewrite) {
+    const score = fields.rewrite_score ? `，改写后质量评分 ${fields.rewrite_score}` : "";
+    return fields.accepted_rewrite === "true"
+      ? `自动改写已采纳${score}。`
+      : `自动改写未采纳，保留质量更高的原稿。`;
+  }
+
+  if (stage === "compare" && fields.accepted_improvement) {
+    const baseline = fields.comparison_score || fields.baseline_score || fields.display_baseline_score;
+    const candidate = fields.candidate_score;
+    const scoreText = baseline && candidate ? `当前稿 ${baseline}，候选稿 ${candidate}；` : "";
+    return fields.accepted_improvement === "true"
+      ? `${scoreText}候选优化稿质量更高，已采纳本次优化。`
+      : `${scoreText}候选优化稿未超过当前稿，已保留原稿。`;
+  }
+
+  if (stage === "done") {
+    const rejectedImprove = message.match(/^本次优化未采纳：候选稿评分\s*([0-9.]+%)\s*未高于当前草稿\s*([0-9.]+%)，已保留用户当前草稿。$/);
+    if (rejectedImprove) {
+      return `本次优化未采纳：候选稿评分 ${rejectedImprove[1]} 未高于当前稿，已保留原稿。`;
+    }
+  }
+
+  return humanizeLogText(message);
+}
+
+function formatDraftVersionReason(task: AgentTask) {
+  const reason = task.draftVersionReason || "";
+  const trace = parseJsonList<AgentTraceStep>(task.agentTraceJson);
+  const compare = [...trace].reverse().find((step) => step.stage === "compare");
+  if (!compare) {
+    return reason;
+  }
+
+  const fields = parseLogFields(compare.output_summary);
+  const candidate = fields.candidate_score;
+  const comparison = bestPercent(fields.comparison_score, fields.previous_saved_score, fields.baseline_score);
+  if (!candidate || !comparison || !fields.accepted_improvement) {
+    return reason;
+  }
+
+  if (fields.accepted_improvement === "true") {
+    return `再次优化已采纳：质量分从 ${comparison} 提升到 ${candidate}。`;
+  }
+  return `本次优化未采纳：候选稿评分 ${candidate} 未高于当前稿 ${comparison}，已保留原稿。`;
+}
+
+function bestPercent(...values: Array<string | undefined>) {
+  const parsed = values
+    .map((value) => ({ value, numeric: parsePercentValue(value) }))
+    .filter((item): item is { value: string; numeric: number } => item.value !== undefined && item.numeric !== null);
+  if (!parsed.length) {
+    return undefined;
+  }
+  return parsed.reduce((best, item) => item.numeric > best.numeric ? item : best).value;
+}
+
+function parsePercentValue(value?: string) {
+  if (!value) {
+    return null;
+  }
+  const numeric = Number(value.replace("%", "").trim());
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function parseLogFields(message: string) {
+  const fields: Record<string, string> = {};
+  for (const part of message.split(";")) {
+    const match = part.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.+)$/);
+    if (match) {
+      fields[match[1]] = match[2].trim();
+    }
+  }
+  return fields;
+}
+
+function stripLeadingField(message: string, field: string) {
+  return message.replace(new RegExp(`^${field}=[^;]+;\\s*`), "");
+}
+
+function humanizeLogText(message: string) {
+  return message
+    .replace(/\bPASS\b/g, "通过")
+    .replace(/\bNEEDS_REWRITE\b/g, "需要改写")
+    .replace(/\bNEEDS_USER_INPUT\b/g, "需要补充资料")
+    .replace(/\bSUCCEEDED\b/g, "已完成")
+    .replace(/\bFAILED\b/g, "失败")
+    .replace(/\baccepted_rewrite=true\b/g, "已采纳自动改写")
+    .replace(/\baccepted_rewrite=false\b/g, "未采纳自动改写")
+    .replace(/\baccepted_improvement=true\b/g, "已采纳优化稿")
+    .replace(/\baccepted_improvement=false\b/g, "未采纳优化稿")
+    .replace(/\bkept_current=true\b/g, "已保留当前稿")
+    .replace(/\braw_hits=/g, "候选片段数 ")
+    .replace(/\bdeduped=/g, "去重后 ")
+    .replace(/\bparents=/g, "合并上下文 ")
+    .replace(/\bretrieved=/g, "选出证据 ")
+    .replace(/\bcandidate_chars=/g, "候选稿字符数 ")
+    .replace(/\brewrite_score=/g, "改写评分 ")
+    .replace(/\bcandidate_score=/g, "候选稿评分 ")
+    .replace(/\bbaseline_score=/g, "当前稿评分 ")
+    .replace(/\bdisplay_baseline_score=/g, "对比基准评分 ");
+}
+
+function latestStageLogs(logs: AgentTaskLog[], task?: AgentTask | null) {
   const byStage = new Map<string, AgentTaskLog>();
   for (const log of logs) byStage.set(log.stage, log);
-  return ["queued", "skill", "parse", "retrieve", "generate", "quality", "rewrite", "compare", "done", "failed"]
+  const visible = ["queued", "skill", "parse", "retrieve", "reflect", "retrieve_repair", "regenerate", "generate", "quality", "quality_repair", "rewrite", "compare", "quality_final", "done", "failed"]
     .map((stage) => byStage.get(stage))
     .filter((log): log is AgentTaskLog => Boolean(log));
+  const inferred = inferRunningLog(logs, visible, task);
+  return inferred ? [...visible, inferred] : visible;
+}
+
+function inferRunningLog(logs: AgentTaskLog[], visibleLogs: AgentTaskLog[], task?: AgentTask | null): AgentTaskLog | null {
+  if (!task || !["QUEUED", "RUNNING"].includes(task.status) || visibleLogs.some(isTerminalTaskLog)) {
+    return null;
+  }
+  const last = logs[logs.length - 1];
+  if (!last) {
+    return null;
+  }
+  if (last.stage === "quality" && last.status === "SUCCEEDED" && last.message.includes("NEEDS_REWRITE") && !logs.some((log) => log.stage === "rewrite")) {
+    return {
+      taskId: task.id,
+      stage: "rewrite",
+      status: "RUNNING",
+      message: "质量检查建议改写，正在自动改写候选稿。"
+    };
+  }
+  if (last.stage === "generate" && last.status === "SUCCEEDED") {
+    return {
+      taskId: task.id,
+      stage: "quality_candidate",
+      status: "RUNNING",
+      message: "候选稿已生成，正在进行质量评估。"
+    };
+  }
+  return null;
 }
 
 function skillLabel(skillId?: string) {
