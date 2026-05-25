@@ -749,7 +749,7 @@ def build_search_queries(payload: ReportRequest, skill: SkillSpec) -> list[Searc
         f"课程：{payload.course or ''}",
         f"作业描述：{payload.description or ''}",
     ]
-    skill_parts = [
+    structure_parts = [
         f"生成类型：{skill.label}",
         f"必要章节：{'、'.join(skill.required_sections)}",
         f"检索提示：{skill.query_hint}",
@@ -760,23 +760,9 @@ def build_search_queries(payload: ReportRequest, skill: SkillSpec) -> list[Searc
     ]
     return [
         SearchQuery(name="assignment_query", text="\n".join(part for part in assignment_parts if part.strip())),
-        SearchQuery(name="skill_query", text="\n".join(part for part in skill_parts if part.strip())),
-        SearchQuery(name="section_query", text="\n".join(part for part in section_parts if part.strip())),
         SearchQuery(
-            name="plan_query",
-            text="\n".join(
-                [
-                    f"报告结构规划：{' '.join(skill.required_sections)}",
-                    f"交付目标：{payload.description or payload.title}",
-                    f"检索重点：{skill.query_hint}",
-                ]
-            ),
-        ),
-        SearchQuery(
-            name="keyword_query",
-            text=" ".join(
-                extract_keywords(" ".join([payload.title, payload.course or "", payload.description or "", skill.query_hint]))[:20]
-            ),
+            name="structure_query",
+            text="\n".join(part for part in [*structure_parts, *section_parts] if part.strip()),
         ),
     ]
 

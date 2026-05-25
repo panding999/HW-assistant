@@ -735,7 +735,9 @@ def search_materials(
     distances_by_query = normalize_result_lists(results.get("distances"), len(queries))
     ids_by_query = normalize_result_lists(results.get("ids"), len(queries))
 
-    candidates: list[dict[str, Any]] = []
+    vector_hits_by_query: list[list[dict[str, Any]]] = []
+    vector_child_chunks: list[dict[str, Any]] = []
+    merged_candidates: dict[str, dict[str, Any]] = {}
     per_query_counts: dict[str, int] = {}
     raw_hits = 0
     for query_index, query_item in enumerate(queries):
@@ -743,28 +745,46 @@ def search_materials(
         metadatas = metadatas_by_query[query_index]
         distances = distances_by_query[query_index]
         ids = ids_by_query[query_index]
-        per_query_counts[query_item.name] = len(documents)
-        raw_hits += len(documents)
+        query_vector_hits: list[dict[str, Any]] = []
         for index, document in enumerate(documents):
             metadata = metadatas[index] if index < len(metadatas) and metadatas[index] else {}
             if str(metadata.get("source_type") or "child") == "parent":
                 continue
             distance = distances[index] if index < len(distances) else None
-            vector_score = None if distance is None else 1 / (1 + max(float(distance), 0.0))
+            vector_score = 0.0 if distance is None else 1 / (1 + max(float(distance), 0.0))
             chunk_id = str(ids[index]) if index < len(ids) else f"{query_index}-{index}"
-            candidates.append(
-                {
-                    "query_text": query_item.text,
-                    "chunk_id": chunk_id,
-                    "document": str(document),
-                    "metadata": metadata,
-                    "vector_score": vector_score,
-                    "child_excerpt": summarize(str(document), 700),
-                }
-            )
+            hit = {
+                "query_text": query_item.text,
+                "chunk_id": chunk_id,
+                "document": str(document),
+                "metadata": metadata,
+                "vector_score": vector_score,
+                "bm25_score": 0.0,
+                "child_excerpt": summarize(str(document), 700),
+            }
+            query_vector_hits.append(hit)
+            vector_child_chunks.append(hit)
+            merge_candidate(merged_candidates, hit)
+        vector_hits_by_query.append(query_vector_hits)
 
-    vector_norms = normalize_scores([item["vector_score"] or 0.0 for item in candidates])
-    keyword_norms = normalize_scores(bm25_keyword_scores(candidates))
+    child_chunks = load_child_chunks(collection)
+    if not child_chunks:
+        child_chunks = dedupe_candidate_chunks(vector_child_chunks)
+
+    for query_index, query_item in enumerate(queries):
+        query_bm25_hits = bm25_search_child_chunks(query_item.text, child_chunks, n_results)
+        vector_count = len(vector_hits_by_query[query_index])
+        bm25_ids = {item["chunk_id"] for item in query_bm25_hits}
+        vector_ids = {item["chunk_id"] for item in vector_hits_by_query[query_index]}
+        per_query_counts[query_item.name] = len(vector_ids | bm25_ids)
+        raw_hits += vector_count + len(query_bm25_hits)
+        for hit in query_bm25_hits:
+            hit["query_text"] = query_item.text
+            merge_candidate(merged_candidates, hit)
+
+    candidates = list(merged_candidates.values())
+    vector_norms = normalize_scores([item["vector_score"] for item in candidates])
+    keyword_norms = normalize_scores([item["bm25_score"] for item in candidates])
     parent_texts = load_parent_texts(candidates, parent_chunk_loader)
 
     by_chunk_id: dict[str, RetrievedEvidence] = {}
@@ -827,6 +847,93 @@ def search_materials(
         rerank_applied=rerank_applied,
         rerank_failed_reason=rerank_failed_reason,
     )
+
+
+def merge_candidate(candidates: dict[str, dict[str, Any]], item: dict[str, Any]) -> None:
+    chunk_id = item["chunk_id"]
+    existing = candidates.get(chunk_id)
+    if existing is None:
+        candidates[chunk_id] = item.copy()
+        candidates[chunk_id]["vector_score"] = float(item.get("vector_score") or 0.0)
+        candidates[chunk_id]["bm25_score"] = float(item.get("bm25_score") or 0.0)
+        return
+    existing["vector_score"] = max(float(existing.get("vector_score") or 0.0), float(item.get("vector_score") or 0.0))
+    existing["bm25_score"] = max(float(existing.get("bm25_score") or 0.0), float(item.get("bm25_score") or 0.0))
+    if len(str(item.get("document") or "")) > len(str(existing.get("document") or "")):
+        existing["document"] = item.get("document") or ""
+        existing["child_excerpt"] = item.get("child_excerpt") or summarize(str(existing["document"]), 700)
+    if not existing.get("metadata") and item.get("metadata"):
+        existing["metadata"] = item["metadata"]
+
+
+def load_child_chunks(collection: Any) -> list[dict[str, Any]]:
+    if not hasattr(collection, "get"):
+        return []
+    try:
+        result = collection.get(where={"source_type": "child"}, include=["documents", "metadatas"])
+        chunks = normalize_child_chunk_get_result(result)
+        if chunks:
+            return chunks
+    except TypeError:
+        pass
+    except Exception:
+        pass
+    try:
+        result = collection.get(include=["documents", "metadatas"])
+    except Exception:
+        return []
+    return normalize_child_chunk_get_result(result)
+
+
+def normalize_child_chunk_get_result(result: Any) -> list[dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    ids = result.get("ids") if isinstance(result.get("ids"), list) else []
+    documents = result.get("documents") if isinstance(result.get("documents"), list) else []
+    metadatas = result.get("metadatas") if isinstance(result.get("metadatas"), list) else []
+    chunks: list[dict[str, Any]] = []
+    for index, document in enumerate(documents):
+        metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
+        if str(metadata.get("source_type") or "child") == "parent":
+            continue
+        chunk_id = str(ids[index]) if index < len(ids) else f"bm25-{index}"
+        chunks.append(
+            {
+                "query_text": "",
+                "chunk_id": chunk_id,
+                "document": str(document),
+                "metadata": metadata,
+                "vector_score": 0.0,
+                "bm25_score": 0.0,
+                "child_excerpt": summarize(str(document), 700),
+            }
+        )
+    return chunks
+
+
+def dedupe_candidate_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_chunk_id: dict[str, dict[str, Any]] = {}
+    for chunk in chunks:
+        by_chunk_id.setdefault(chunk["chunk_id"], {**chunk, "vector_score": 0.0, "bm25_score": 0.0})
+    return list(by_chunk_id.values())
+
+
+def bm25_search_child_chunks(query_text: str, child_chunks: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if not child_chunks:
+        return []
+    documents = [str(item.get("document") or "") for item in child_chunks]
+    metadatas = [item.get("metadata") if isinstance(item.get("metadata"), dict) else {} for item in child_chunks]
+    scores = bm25_score(query_text, documents, metadatas)
+    ranked: list[dict[str, Any]] = []
+    for index, score in enumerate(scores):
+        if score <= 0:
+            continue
+        item = child_chunks[index].copy()
+        item["bm25_score"] = score
+        item["vector_score"] = 0.0
+        ranked.append(item)
+    ranked.sort(key=lambda item: item["bm25_score"], reverse=True)
+    return ranked[:limit]
 
 
 def normalize_search_queries(query: str | list[SearchQuery]) -> list[SearchQuery]:
@@ -1114,9 +1221,6 @@ def append_plan_query(query: str | list[SearchQuery], report_plan: str) -> str |
         return query
     queries = normalize_search_queries(query)
     queries.append(SearchQuery(name="plan_query", text=report_plan))
-    terms = " ".join(extract_keywords(report_plan)[:16])
-    if terms:
-        queries.append(SearchQuery(name="keyword_query", text=terms))
     return queries
 
 
@@ -1444,65 +1548,33 @@ def build_supplemental_queries(
     quality: QualityMetrics,
     report_plan: str = "",
 ) -> list[SearchQuery]:
-    base_parts = [
+    assignment_parts = [
+        f"assignment id: {getattr(payload, 'assignment_id', '')}",
         f"assignment title: {getattr(payload, 'title', '')}",
         f"course: {getattr(payload, 'course', '') or ''}",
         f"assignment description: {getattr(payload, 'description', '') or ''}",
+    ]
+    structure_parts = [
         f"skill: {getattr(skill, 'label', '') or getattr(skill, 'id', '')}",
         f"query hint: {getattr(skill, 'query_hint', '') or ''}",
     ]
-    base_text = "\n".join(part for part in base_parts if part.strip() and not part.endswith(": "))
     required_sections = [str(section) for section in getattr(skill, "required_sections", []) if str(section).strip()]
     focus_text = "\n".join([*quality.issues[:4], *quality.rewrite_focus[:4]])
-
-    queries: list[SearchQuery] = []
-    if quality.section_completeness < 1.0 and required_sections:
-        queries.append(
-            SearchQuery(
-                name="repair_section_query",
-                text="\n".join(
-                    [
-                        base_text,
-                        "Find missing or weak report section evidence.",
-                        "sections: " + " ".join(required_sections),
-                        report_plan.strip(),
-                    ]
-                ).strip(),
-            )
-        )
-    if quality.grounding_score < 0.65 or quality.citation_coverage < 0.5 or quality.retrieved_chunks < 2:
-        queries.append(
-            SearchQuery(
-                name="repair_grounding_query",
-                text="\n".join(
-                    [
-                        base_text,
-                        "Find source evidence, citations, concrete facts, implementation details, metrics, and supporting material.",
-                        focus_text,
-                    ]
-                ).strip(),
-            )
-        )
+    if required_sections:
+        structure_parts.append("sections: " + " ".join(required_sections))
     if focus_text.strip():
-        queries.append(
-            SearchQuery(
-                name="repair_focus_query",
-                text="\n".join(
-                    [
-                        base_text,
-                        "Quality issues and rewrite focus that need additional retrieval:",
-                        focus_text,
-                    ]
-                ).strip(),
-            )
+        structure_parts.extend(
+            [
+                "quality feedback requiring additional evidence:",
+                focus_text,
+            ]
         )
-    if not queries:
-        queries.append(
-            SearchQuery(
-                name="repair_grounding_query",
-                text="\n".join([base_text, report_plan.strip(), focus_text]).strip(),
-            )
-        )
+    queries = [
+        SearchQuery(name="assignment_query", text="\n".join(part for part in assignment_parts if part.strip() and not part.endswith(": "))),
+        SearchQuery(name="structure_query", text="\n".join(part for part in structure_parts if part.strip() and not part.endswith(": "))),
+    ]
+    if report_plan.strip():
+        queries.append(SearchQuery(name="plan_query", text=report_plan.strip()))
     return normalize_search_queries(queries)
 
 

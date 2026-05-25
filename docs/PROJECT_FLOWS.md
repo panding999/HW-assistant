@@ -46,7 +46,7 @@ A：完整流程可以分成九步：
 3. 用户点击生成报告后，后端创建一条 `agent_tasks` 任务，状态为 `QUEUED`。
 4. Spring Boot 异步任务调用 Python Agent 的索引接口，Agent 解析资料并写入 ChromaDB。
 5. Agent 根据用户选择或作业内容识别 Skill，比如实验报告、论文总结、课程问答或动态规划。
-6. Agent 基于作业信息、Skill 信息和章节要求构造多路检索 query，在当前作业的 collection 中召回资料片段。
+6. Agent 基于作业信息和报告结构要求构造 `assignment_query`、`structure_query`；如果动态 Planner 已生成报告计划，再追加 `plan_query`，并在当前作业的 collection 中召回资料片段。
 7. Agent 把检索证据、作业信息、Skill 指令和输出约束组合成 prompt，生成 Markdown 报告初稿。
 8. 质量门控对初稿做结构、证据、具体性、成熟度和风险评估；如果证据不足或章节缺失，最多触发 1 轮补充检索并重生成候选稿。
 9. 后端保存最终报告、质量指标、Agent trace 和任务日志，前端通过 SSE 展示进度，并通过定时刷新兜底补齐收尾阶段。
@@ -85,14 +85,12 @@ A：直接塞整份 PDF 有几个问题。第一是上下文长度不可控，�
 
 ### Q8：你的检索策略有什么特别设计？
 
-A：我没有只用单一路径的 query，也没有完全依赖 LLM 自由改写 query，而是做了确定性的多路 query 扩展。当前主要有几类 query：
+A：我没有只用单一路径的 query，也没有完全依赖 LLM 自由改写 query，而是把检索 query 收敛成确定、可解释的少量类型。当前基础检索只保留两类 query：
 
-- assignment query：作业标题、课程名和作业描述。
-- skill query：Skill 标签、必要章节和 `skill.query_hint`。
-- section query：报告必要章节和作业要求。
-- plan 或 keyword query：动态规划或关键词补充。
+- `assignment_query`：作业标题、课程名和作业描述。
+- `structure_query`：Skill 标签、必要章节、`skill.query_hint` 和作业结构要求。
 
-每路 query 分别做 embedding，再到 ChromaDB 检索候选 chunk，最后按 `chunk_id` 去重，并结合向量相似度、关键词、章节、文件名等信号做轻量 hybrid score。
+如果任务进入动态 Planner，并且已经生成报告计划，系统会额外追加一条 `plan_query`。每路 query 都会同时做两路召回：一路是 ChromaDB cosine 向量检索，另一路是在当前 assignment 的 child chunks 上做 BM25 检索。随后按 `chunk_id` 合并 `vector candidates ∪ bm25 candidates`，缺失的 `vector_score` 或 `bm25_score` 记为 0，归一化后按 `0.6 * vector_norm + 0.4 * bm25_norm` 计算 hybrid score。
 
 这个设计的好处是稳定、可解释、成本低。相比自由式 query rewrite，确定性 query 更容易复现问题，也方便在 Agent trace 中记录每路 query 的命中数、去重后片段数和最终召回结果。
 
@@ -204,7 +202,7 @@ A：主要有三类：
 
 A：自动改写不是无条件触发，必须满足几个条件：报告非空，质量决策是 `NEEDS_REWRITE`，不是 `NEEDS_USER_INPUT`，没有明显人工确认类占位符，并且 Agent trace 没有超过最大步骤数。
 
-如果低分原因更偏向“证据不足、grounding 偏低、章节缺失”，系统不会只在原有上下文里硬改，而是先进入一次轻量 Agentic RAG 修复：根据缺失章节、质量问题和 rewrite focus 生成补充 query，做第二次检索，合并新增证据后重生成候选稿并重新评估。这个补充检索严格限制为最多 1 轮，避免开放式循环。
+如果低分原因更偏向“证据不足、grounding 偏低、章节缺失”，系统不会只在原有上下文里硬改，而是先进入一次轻量 Agentic RAG 修复：把质量问题和 rewrite focus 合并进同一套 `assignment_query` / `structure_query`，动态 Planner 场景继续带上 `plan_query`，做第二次检索，合并新增证据后重生成候选稿并重新评估。这个补充检索严格限制为最多 1 轮，避免开放式循环。
 
 改写策略也不是完全重写，而是“最小必要修补”。它重点修复结构、表达、具体性和来源标注，同时保留原稿中有效的内容、数据、结论和来源。
 
@@ -244,7 +242,7 @@ A：后端创建任务后不会阻塞 HTTP 请求，而是立即返回 `AgentTas
 A：我把 Agent 的关键运行信息都沉淀到任务结果里，包括：
 
 - 任务类型识别结果。
-- 多路 query 数量和命中情况。
+- query 类型、双路召回命中情况和去重结果。
 - 检索到的 evidence chunks。
 - 报告质量评分和问题列表。
 - 是否触发补充检索、自动改写、是否采纳候选稿。
@@ -397,7 +395,7 @@ A：我会坦诚讲三个不足，同时说明改进方向。
 A：可以写成下面这种偏工程结果导向的表达：
 
 - 设计并实现作业报告生成 Agent 闭环，覆盖资料解析、向量检索、任务类型识别、报告生成、独立质量审稿、自动改写、再次优化和任务监控。
-- 基于 ChromaDB 构建作业级 RAG 检索链路，按 assignment 隔离 collection，支持 PDF、Markdown、TXT 资料切片、向量化和多路 Top-K 召回。
+- 基于 ChromaDB 构建作业级 RAG 检索链路，按 assignment 隔离 collection，支持 PDF、Markdown、TXT 资料切片、向量化、`assignment_query` / `structure_query` / 可选 `plan_query` 召回，以及向量 + BM25 双路候选融合。
 - 设计 Skill 路由与动态 Planner，根据作业标题、课程描述和任务要求选择实验报告、论文总结、课程问答等生成策略，未命中固定 Skill 时动态规划报告结构。
 - 引入质量门控机制，结合独立 evaluator 模型和本地规则，从结构完整度、证据贴合度、具体性、可编辑成熟度和风险五个维度评估报告质量。
 - 实现轻量 Agentic RAG 与自动改写闭环，质量门控发现证据不足时触发一次补充检索并重生成候选稿，低于阈值时执行最小必要改写，重评后仅采纳更优版本。
@@ -416,7 +414,7 @@ A：我会从四层回答。
 
 第三是可预测。系统没有让模型自由决定无限循环，而是限定为固定上限的 Agent Loop：检索、生成、质量检查、最多一轮补充检索、最多一次改写。这样成本、耗时和行为边界都比较可控。
 
-第四是可优化。我沉淀了 Hit Rate@5、Unsupported Claim Rate、质量通过率、改写触发率、P95 耗时等指标，可以基于数据去判断 rerank、query 扩展、质量门控和改写策略是否真的有效。
+第四是可优化。我沉淀了 Hit Rate@5、Unsupported Claim Rate、质量通过率、改写触发率、P95 耗时等指标，可以基于数据去判断 rerank、query 结构、质量门控和改写策略是否真的有效。
 
 ### Q35：简历里写 Agent Workflow，但你没有用 LangChain 或 LangGraph，面试官追问怎么办？
 
@@ -428,7 +426,7 @@ A：我会说这个项目的 Agent Loop 是自研的轻量工作流，不是因�
 
 ### Q36：简历里写 BM25 Hybrid、Qwen3-Rerank、Hit Rate@5 和 Unsupported Claim Rate，面试官可能会问这些指标怎么算？
 
-A：Hit Rate@5 衡量的是检索质量。对于每条 hard eval case，我会预先标注回答任务必须召回的关键证据；如果 Top-5 检索结果里命中了关键证据，就算 hit。当前混合检索把 Chroma cosine 距离先转换为相似度，再和 BM25 关键词分数分别归一化，最终按向量相似度 60%、BM25 40% 融合；再接 Qwen3-Rerank 做排序优化。评测中 Hit Rate@5 从 50% 提升到 85%，说明排序链路能把更相关的证据片段排到前面。
+A：Hit Rate@5 衡量的是检索质量。对于每条 hard eval case，我会预先标注回答任务必须召回的关键证据；如果 Top-5 检索结果里命中了关键证据，就算 hit。当前混合检索对每路 query 同时做 Chroma cosine 向量召回和 BM25 child chunk 召回，合并候选后把 cosine 距离转换为相似度，再和 BM25 分数分别归一化，最终按向量相似度 60%、BM25 40% 融合；可选接 Qwen3-Rerank 做排序优化。评测中 Hit Rate@5 从 50% 提升到 85%，说明排序链路能把更相关的证据片段排到前面。
 
 Unsupported Claim Rate 衡量的是生成可靠性。我会抽取或人工检查报告中的关键结论，看它们是否能被检索证据支撑。如果报告提出了材料里没有依据的结论，就计入 unsupported claim。这个指标从 29.8% 降到 15.3%，说明更好的检索排序能减少模型基于不充分上下文进行发挥。
 

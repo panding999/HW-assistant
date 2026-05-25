@@ -87,6 +87,31 @@ class MissingParentCollection:
         }
 
 
+class VectorBm25UnionCollection:
+    def query(self, query_embeddings, n_results, include):
+        return {
+            "ids": [["vector-only"]],
+            "documents": [["unrelated vector document"]],
+            "metadatas": [[
+                {"material_id": 1, "filename": "vector.md", "source_type": "child", "parent_id": "1-p0"},
+            ]],
+            "distances": [[0.0]],
+        }
+
+    def get(self, include, where):
+        self.get_include = include
+        self.get_where = where
+        return {
+            "ids": ["vector-only", "bm25-only", "parent-only"],
+            "documents": ["unrelated vector document", "target target target evidence", "target parent text"],
+            "metadatas": [
+                {"material_id": 1, "filename": "vector.md", "source_type": "child", "parent_id": "1-p0"},
+                {"material_id": 2, "filename": "keyword.md", "source_type": "child", "parent_id": "2-p0", "key_terms": "target"},
+                {"material_id": 3, "filename": "parent.md", "source_type": "parent", "parent_id": "3-p0"},
+            ],
+        }
+
+
 class RepairCollection:
     def __init__(self, include_new_evidence=True):
         self.include_new_evidence = include_new_evidence
@@ -660,9 +685,7 @@ class AgentRuntimeTests(unittest.TestCase):
         queries = build_supplemental_queries(FakePayload(), FakeSkill(), quality, "")
         names = {item.name for item in queries}
         joined = "\n".join(item.text for item in queries)
-        self.assertIn("repair_section_query", names)
-        self.assertIn("repair_grounding_query", names)
-        self.assertIn("repair_focus_query", names)
+        self.assertEqual(names, {"assignment_query", "structure_query"})
         self.assertIn("Add evidence for lab steps", joined)
 
     def test_agentic_rag_retrieves_again_and_accepts_better_candidate(self) -> None:
@@ -685,6 +708,11 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual({item.chunk_id for item in result.retrieved_evidence}, {"10-0", "20-0"})
         self.assertIn("reflect_retrieval_needs", [step.tool_name for step in result.agent_trace])
         self.assertIn("search_materials_repair", [step.tool_name for step in result.agent_trace])
+        reflection = [step for step in result.agent_trace if step.tool_name == "reflect_retrieval_needs"][0]
+        self.assertEqual(
+            [item["name"] for item in reflection.details["supplemental_queries"]],
+            ["assignment_query", "structure_query"],
+        )
         repair_quality = [step for step in result.agent_trace if step.tool_name == "check_repaired_quality"][0]
         self.assertTrue(repair_quality.details["accepted_retrieval_repair"])
 
@@ -758,6 +786,25 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(by_id["keyword-only"].hybrid_score, 0.4)
         self.assertEqual(result.evidence[0].chunk_id, "vector-only")
 
+    def test_search_materials_unions_vector_and_bm25_child_candidates(self) -> None:
+        collection = VectorBm25UnionCollection()
+        result = search_materials(
+            collection,
+            [SearchQuery(name="assignment_query", text="target")],
+            top_k=3,
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+        )
+
+        by_id = {item.chunk_id: item for item in result.evidence}
+        self.assertEqual(collection.get_where, {"source_type": "child"})
+        self.assertIn("vector-only", by_id)
+        self.assertIn("bm25-only", by_id)
+        self.assertNotIn("parent-only", by_id)
+        self.assertEqual(by_id["bm25-only"].vector_score, 0.0)
+        self.assertEqual(by_id["vector-only"].keyword_score, 0.0)
+        self.assertAlmostEqual(by_id["vector-only"].hybrid_score, 0.6)
+        self.assertAlmostEqual(by_id["bm25-only"].hybrid_score, 0.4)
+
     def test_missing_parent_context_falls_back_to_child_excerpt(self) -> None:
         result = search_materials(
             MissingParentCollection(),
@@ -785,6 +832,8 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(result.agent_trace[0].tool_name, "plan_report_outline")
         self.assertEqual(result.agent_trace[1].tool_name, "search_materials")
         self.assertIn("plan", result.agent_trace[0].details)
+        search_step = result.agent_trace[1]
+        self.assertEqual(list(search_step.details["per_query_counts"].keys()), ["assignment_query", "plan_query"])
 
     def test_agent_loop_keeps_original_when_rewrite_scores_lower(self) -> None:
         client = WorseRewriteClient()

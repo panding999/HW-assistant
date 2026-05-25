@@ -142,6 +142,6 @@ Retrieval metrics such as `Hit Rate@5` require human-labeled gold data. For this
 - Start with 20-50 real assignment queries.
 - Label `expectedSkillId`, `relevantChunkIds`, `expectedSections`, and optionally `goldMaterialIds`.
 - Use current top-10/top-20 retrieval results to speed up labeling, but allow manual additions when the right chunk was not retrieved.
-- Compare vector-only retrieval with hybrid retrieval to show whether Multi-Query, Parent-Child context, and keyword signals improve recall.
+- Compare vector-only retrieval with hybrid retrieval to show whether simplified deterministic queries, BM25 child-chunk recall, Parent-Child context, and optional rerank improve recall.
 
 The online quality gate is not a fully objective benchmark because the evaluator still uses an LLM. Treat it as runtime quality control, and use the manual gold set for more defensible offline evaluation.
