@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from app.main import ReportRequest, build_prompt, build_search_queries, resolve_skill, route_skill_by_rules
+    from app.main import MaterialRef, ReportRequest, build_index_chunks, build_parent_chunks, build_prompt, build_search_queries, resolve_skill, route_skill_by_rules
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(f"optional agent dependency is not installed: {exc.name}") from exc
 
@@ -66,6 +66,30 @@ class SkillRoutingTests(unittest.TestCase):
         )
         self.assertEqual(len(queries), 5)
         self.assertTrue(all(item.text.strip() for item in queries))
+
+    def test_index_metadata_keeps_only_document_summary_and_parent_id(self) -> None:
+        material = MaterialRef(id=7, filename="requirements.md", path="unused.md")
+        text = (
+            "# 实验目标\n"
+            "完成检索系统改造，比较向量检索和关键词检索的贡献。\n\n"
+            "# 实验步骤\n"
+            "第一步构建索引。第二步计算 BM25。第三步合并父 chunk 原文。\n\n"
+            "# 验收标准\n"
+            "结果需要包含得分说明和引用证据。"
+        )
+        child_chunks = build_index_chunks(assignment_id=3, material=material, text=text)
+        parent_chunks = build_parent_chunks(assignment_id=3, material=material, text=text)
+
+        self.assertTrue(parent_chunks)
+        self.assertTrue(child_chunks)
+        self.assertIn("实验目标", child_chunks[0].metadata["document_summary"])
+        self.assertIn("实验步骤", child_chunks[0].metadata["document_summary"])
+        self.assertIn("parent_id", child_chunks[0].metadata)
+        self.assertNotIn("parent_excerpt", child_chunks[0].metadata)
+        self.assertNotIn("parent_summary", child_chunks[0].metadata)
+        self.assertNotIn("section_summary", child_chunks[0].metadata)
+        self.assertEqual(parent_chunks[0].id, child_chunks[0].metadata["parent_id"])
+        self.assertIn("完成检索系统改造", parent_chunks[0].content)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 from pathlib import PurePath
@@ -33,8 +34,6 @@ class RetrievedEvidence(BaseModel):
     rerank_score: float | None = None
     rerank_model: str = ""
     document_summary: str = ""
-    document_outline: str = ""
-    section_summary: str = ""
     key_terms: str = ""
 
 
@@ -124,6 +123,7 @@ def run_report_agent(
     build_prompt: Callable[[Any, Any, str], str],
     normalize_markdown: Callable[[str], str],
     logger: logging.Logger,
+    parent_chunk_loader: Callable[[list[str]], dict[str, str]] | None = None,
     quality_llm_client: Callable[[], Any] | None = None,
     evaluator_model: str | None = None,
     evaluator_mode: str = "fallback",
@@ -184,7 +184,7 @@ def run_report_agent(
         )
 
     started = time.perf_counter()
-    search_result = search_materials(collection, effective_query, payload.top_k, embed_texts)
+    search_result = search_materials(collection, effective_query, payload.top_k, embed_texts, parent_chunk_loader)
     evidence = search_result.evidence
     context_text = evidence_context(evidence)
     record(
@@ -281,7 +281,7 @@ def run_report_agent(
         )
 
         started = time.perf_counter()
-        repair_search_result = search_materials(collection, supplemental_queries, payload.top_k, embed_texts)
+        repair_search_result = search_materials(collection, supplemental_queries, payload.top_k, embed_texts, parent_chunk_loader)
         merged_evidence, new_evidence_count = merge_evidence(evidence, repair_search_result.evidence)
         record(
             stage="retrieve_repair",
@@ -475,6 +475,7 @@ def improve_report_agent(
     llm_client: Callable[[], Any],
     normalize_markdown: Callable[[str], str],
     logger: logging.Logger,
+    parent_chunk_loader: Callable[[list[str]], dict[str, str]] | None = None,
     quality_llm_client: Callable[[], Any] | None = None,
     evaluator_model: str | None = None,
     evaluator_mode: str = "fallback",
@@ -515,7 +516,7 @@ def improve_report_agent(
     )
 
     started = time.perf_counter()
-    search_result = search_materials(collection, query, payload.top_k, embed_texts)
+    search_result = search_materials(collection, query, payload.top_k, embed_texts, parent_chunk_loader)
     evidence = search_result.evidence
     context_text = evidence_context(evidence)
     record(
@@ -716,6 +717,7 @@ def search_materials(
     query: str | list[SearchQuery],
     top_k: int,
     embed_texts: Callable[[list[str]], list[list[float]]],
+    parent_chunk_loader: Callable[[list[str]], dict[str, str]] | None = None,
 ) -> SearchResult:
     queries = normalize_search_queries(query)
     query_embeddings = embed_texts([item.text for item in queries])
@@ -733,7 +735,7 @@ def search_materials(
     distances_by_query = normalize_result_lists(results.get("distances"), len(queries))
     ids_by_query = normalize_result_lists(results.get("ids"), len(queries))
 
-    by_chunk_id: dict[str, RetrievedEvidence] = {}
+    candidates: list[dict[str, Any]] = []
     per_query_counts: dict[str, int] = {}
     raw_hits = 0
     for query_index, query_item in enumerate(queries):
@@ -745,38 +747,56 @@ def search_materials(
         raw_hits += len(documents)
         for index, document in enumerate(documents):
             metadata = metadatas[index] if index < len(metadatas) and metadatas[index] else {}
+            if str(metadata.get("source_type") or "child") == "parent":
+                continue
             distance = distances[index] if index < len(distances) else None
-            vector_score = None if distance is None else round(1 / (1 + max(float(distance), 0.0)), 4)
-            keyword_score = keyword_match_score(query_item.text, str(document), metadata)
-            hybrid_score = round(((vector_score or 0.0) * 0.55) + (keyword_score * 0.45), 4)
+            vector_score = None if distance is None else 1 / (1 + max(float(distance), 0.0))
             chunk_id = str(ids[index]) if index < len(ids) else f"{query_index}-{index}"
-            parent_excerpt = str(metadata.get("parent_excerpt") or "")
-            child_excerpt = summarize(str(document), 700)
-            excerpt = child_excerpt
-            if parent_excerpt and parent_excerpt.strip() != child_excerpt.strip():
-                excerpt = f"{summarize(parent_excerpt, 900)}\n\n匹配片段：{child_excerpt}"
-            candidate = RetrievedEvidence(
-                chunk_id=chunk_id,
-                material_id=int(metadata["material_id"]) if metadata.get("material_id") is not None else None,
-                filename=str(metadata.get("filename") or ""),
-                score=hybrid_score,
-                excerpt=summarize(excerpt, 1200),
-                parent_id=str(metadata.get("parent_id") or "") or None,
-                section_title=str(metadata.get("section_title") or ""),
-                source_type=str(metadata.get("source_type") or "child"),
-                vector_score=vector_score,
-                keyword_score=round(keyword_score, 4),
-                hybrid_score=hybrid_score,
-                document_summary=str(metadata.get("document_summary") or ""),
-                document_outline=str(metadata.get("document_outline") or ""),
-                section_summary=str(metadata.get("section_summary") or ""),
-                key_terms=str(metadata.get("key_terms") or ""),
+            candidates.append(
+                {
+                    "query_text": query_item.text,
+                    "chunk_id": chunk_id,
+                    "document": str(document),
+                    "metadata": metadata,
+                    "vector_score": vector_score,
+                    "child_excerpt": summarize(str(document), 700),
+                }
             )
-            existing = by_chunk_id.get(chunk_id)
-            existing_score = -1.0 if existing is None or existing.hybrid_score is None else existing.hybrid_score
-            candidate_score = -1.0 if candidate.hybrid_score is None else candidate.hybrid_score
-            if existing is None or candidate_score > existing_score:
-                by_chunk_id[chunk_id] = candidate
+
+    vector_norms = normalize_scores([item["vector_score"] or 0.0 for item in candidates])
+    keyword_norms = normalize_scores(bm25_keyword_scores(candidates))
+    parent_texts = load_parent_texts(candidates, parent_chunk_loader)
+
+    by_chunk_id: dict[str, RetrievedEvidence] = {}
+    for index, item in enumerate(candidates):
+        metadata = item["metadata"]
+        parent_id = str(metadata.get("parent_id") or "") or None
+        child_excerpt = item["child_excerpt"]
+        parent_text = parent_texts.get(parent_id or "", "")
+        excerpt = child_excerpt
+        if parent_text and parent_text.strip() != child_excerpt.strip():
+            excerpt = f"{summarize(parent_text, 900)}\n\n匹配片段：{child_excerpt}"
+        hybrid_score = round(vector_norms[index] * 0.6 + keyword_norms[index] * 0.4, 4)
+        candidate = RetrievedEvidence(
+            chunk_id=item["chunk_id"],
+            material_id=int(metadata["material_id"]) if metadata.get("material_id") is not None else None,
+            filename=str(metadata.get("filename") or ""),
+            score=hybrid_score,
+            excerpt=summarize(excerpt, 1200),
+            parent_id=parent_id,
+            section_title=str(metadata.get("section_title") or ""),
+            source_type=str(metadata.get("source_type") or "child"),
+            vector_score=round(vector_norms[index], 4),
+            keyword_score=round(keyword_norms[index], 4),
+            hybrid_score=hybrid_score,
+            document_summary=str(metadata.get("document_summary") or ""),
+            key_terms=str(metadata.get("key_terms") or ""),
+        )
+        existing = by_chunk_id.get(candidate.chunk_id)
+        existing_score = -1.0 if existing is None or existing.hybrid_score is None else existing.hybrid_score
+        candidate_score = -1.0 if candidate.hybrid_score is None else candidate.hybrid_score
+        if existing is None or candidate_score > existing_score:
+            by_chunk_id[candidate.chunk_id] = candidate
 
     ranked_evidence = sorted(
         by_chunk_id.values(),
@@ -825,27 +845,114 @@ def normalize_search_queries(query: str | list[SearchQuery]) -> list[SearchQuery
 
 
 def keyword_match_score(query_text: str, document: str, metadata: dict[str, Any]) -> float:
-    terms = extract_keywords(query_text)
-    if not terms:
-        return 0.0
-    haystack = " ".join(
-        [
-            document,
-            str(metadata.get("filename") or ""),
-            str(metadata.get("section_title") or ""),
-            str(metadata.get("section_summary") or ""),
-            str(metadata.get("key_terms") or ""),
-        ]
-    ).lower()
-    hits = sum(1 for term in terms if term.lower() in haystack)
-    section_bonus = 0.15 if str(metadata.get("section_title") or "").lower() in query_text.lower() else 0.0
-    filename_bonus = 0.10 if str(metadata.get("filename") or "").lower() in query_text.lower() else 0.0
-    return min(1.0, hits / max(len(terms), 1) + section_bonus + filename_bonus)
+    return bm25_score(query_text, [document], [metadata])[0]
+
+
+def bm25_keyword_scores(candidates: list[dict[str, Any]]) -> list[float]:
+    query_text = "\n".join(str(item.get("query_text") or "") for item in candidates)
+    documents = [str(item.get("document") or "") for item in candidates]
+    metadatas = [item.get("metadata") if isinstance(item.get("metadata"), dict) else {} for item in candidates]
+    return bm25_score(query_text, documents, metadatas)
+
+
+def bm25_score(query_text: str, documents: list[str], metadatas: list[dict[str, Any]]) -> list[float]:
+    query_terms = tokenize_for_bm25(query_text)
+    if not query_terms or not documents:
+        return [0.0 for _ in documents]
+    corpus_tokens = [
+        tokenize_for_bm25(
+            " ".join(
+                [
+                    document,
+                    str(metadata.get("filename") or ""),
+                    str(metadata.get("section_title") or ""),
+                    str(metadata.get("document_summary") or ""),
+                    str(metadata.get("key_terms") or ""),
+                ]
+            )
+        )
+        for document, metadata in zip(documents, metadatas)
+    ]
+    doc_count = len(corpus_tokens)
+    avg_len = sum(len(tokens) for tokens in corpus_tokens) / max(doc_count, 1)
+    doc_freq: dict[str, int] = {}
+    for tokens in corpus_tokens:
+        for term in set(tokens):
+            doc_freq[term] = doc_freq.get(term, 0) + 1
+    scores: list[float] = []
+    for tokens in corpus_tokens:
+        term_freq: dict[str, int] = {}
+        for term in tokens:
+            term_freq[term] = term_freq.get(term, 0) + 1
+        score = 0.0
+        for term in query_terms:
+            freq = term_freq.get(term, 0)
+            if freq <= 0:
+                continue
+            df = doc_freq.get(term, 0)
+            idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
+            denom = freq + 1.5 * (1 - 0.75 + 0.75 * len(tokens) / max(avg_len, 1.0))
+            score += idf * (freq * 2.5) / denom
+        scores.append(score)
+    return scores
+
+
+def tokenize_for_bm25(text: str) -> list[str]:
+    tokens: list[str] = []
+    for raw in re.findall(r"[\u4e00-\u9fff]+|[A-Za-z][A-Za-z0-9_+-]*|\d+(?:\.\d+)?", text or ""):
+        if re.fullmatch(r"[\u4e00-\u9fff]+", raw):
+            if len(raw) == 1:
+                tokens.append(raw)
+            else:
+                tokens.extend(raw[index : index + 2] for index in range(len(raw) - 1))
+                if len(raw) <= 8:
+                    tokens.append(raw)
+        else:
+            tokens.append(raw.lower())
+    return [token for token in tokens if token and token not in BM25_STOPWORDS]
+
+
+BM25_STOPWORDS = {
+    "作业", "报告", "资料", "生成", "章节", "内容", "要求", "根据", "当前", "需要", "说明", "分析",
+    "the", "and", "for", "with", "from", "this", "that",
+}
+
+
+def normalize_scores(scores: list[float]) -> list[float]:
+    if not scores:
+        return []
+    low = min(scores)
+    high = max(scores)
+    if high == low:
+        return [0.0 for _ in scores]
+    return [(score - low) / (high - low) for score in scores]
+
+
+def load_parent_texts(
+    candidates: list[dict[str, Any]],
+    parent_chunk_loader: Callable[[list[str]], dict[str, str]] | None,
+) -> dict[str, str]:
+    if parent_chunk_loader is None:
+        return {}
+    parent_ids = sorted(
+        {
+            str(item.get("metadata", {}).get("parent_id") or "")
+            for item in candidates
+            if str(item.get("metadata", {}).get("parent_id") or "")
+        }
+    )
+    if not parent_ids:
+        return {}
+    try:
+        return parent_chunk_loader(parent_ids) or {}
+    except Exception:
+        return {}
 
 
 def extract_keywords(text: str) -> list[str]:
     raw = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_+-]{2,}|\d+(?:\.\d+)?", text or "")
     stopwords = {
+        *BM25_STOPWORDS,
         "作业", "报告", "资料", "生成", "章节", "内容", "要求", "根据", "当前", "需要", "说明", "分析",
         "the", "and", "for", "with", "from", "this", "that",
     }
@@ -878,13 +985,12 @@ def evidence_context(evidence: list[RetrievedEvidence]) -> str:
     summary_blocks = []
     seen_summaries: set[str] = set()
     for item in evidence:
-        summary_key = f"{item.filename}:{item.document_summary}:{item.document_outline}"
+        summary_key = f"{item.filename}:{item.document_summary}"
         if item.document_summary and summary_key not in seen_summaries:
             seen_summaries.add(summary_key)
             summary_blocks.append(
-                f"资料全局摘要 [{item.filename or 'unknown'}]\n"
-                f"{item.document_summary}\n"
-                f"{item.document_outline}".strip()
+                f"资料全文框架 [{item.filename or 'unknown'}]\n"
+                f"{item.document_summary}".strip()
             )
     if summary_blocks:
         blocks.append("\n\n".join(summary_blocks))
@@ -895,10 +1001,7 @@ def evidence_context(evidence: list[RetrievedEvidence]) -> str:
         if item.parent_id:
             source_parts.append(f"parent: {item.parent_id}")
         source = f"[{' | '.join(source_parts)}]"
-        section_summary = f"章节摘要：{item.section_summary}\n" if item.section_summary else ""
         blocks.append(f"{source}\n{item.excerpt}")
-        if section_summary:
-            blocks[-1] = f"{source}\n{section_summary}{item.excerpt}"
     return "\n\n---\n\n".join(blocks)
 
 

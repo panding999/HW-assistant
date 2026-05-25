@@ -96,7 +96,6 @@ def evidence_block(evidence: list[RetrievedEvidence], *, limit: int = 8) -> str:
                     f"source: {item.filename}",
                     f"section: {item.section_title}",
                     f"chunk_id: {item.chunk_id}",
-                    f"section_summary: {item.section_summary[:500]}",
                     f"excerpt: {item.excerpt[:1400]}",
                 ]
             )

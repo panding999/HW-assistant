@@ -137,7 +137,7 @@ The exporter reads persisted fields such as `retrievedEvidenceJson`,
 
 ## Manual Gold Set Guidance
 
-Retrieval metrics such as `Hit Rate@5` and `Recall@5` require human-labeled gold data. For this project, a small set is enough for resume demonstration:
+Retrieval metrics such as `Hit Rate@5` require human-labeled gold data. For this project, a small set is enough for resume demonstration:
 
 - Start with 20-50 real assignment queries.
 - Label `expectedSkillId`, `relevantChunkIds`, `expectedSections`, and optionally `goldMaterialIds`.

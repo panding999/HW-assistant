@@ -99,7 +99,6 @@ def evidence_haystack(item: RetrievedEvidence) -> str:
         [
             item.filename or "",
             item.section_title or "",
-            item.section_summary or "",
             item.excerpt or "",
             item.document_summary or "",
             item.key_terms or "",
@@ -130,6 +129,28 @@ def first_match(evidence: list[RetrievedEvidence], gold_items: list[dict[str, An
     return None
 
 
+def matched_gold_items(evidence: list[RetrievedEvidence], gold_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    matched_indexes: set[int] = set()
+    for rank, item in enumerate(evidence, start=1):
+        for gold_index, gold in enumerate(gold_items):
+            if gold_index in matched_indexes:
+                continue
+            if gold_matches(item, gold):
+                matched_indexes.add(gold_index)
+                matches.append(
+                    {
+                        "rank": rank,
+                        "chunk_id": item.chunk_id,
+                        "filename": item.filename,
+                        "section_title": item.section_title,
+                        "matched_gold": gold,
+                    }
+                )
+                break
+    return matches
+
+
 def compact_evidence(item: RetrievedEvidence, rank: int) -> dict[str, Any]:
     return {
         "rank": rank,
@@ -155,7 +176,8 @@ def evaluate_case(case: dict[str, Any], *, keep_collections: bool) -> dict[str, 
     resolved_skill_id, routing_mode, evidence = retrieve_case(case)
     top_k = int(case.get("top_k") or 5)
     top_evidence = evidence[:top_k]
-    match = first_match(top_evidence, case.get("gold_evidence") or [])
+    gold_evidence = case.get("gold_evidence") or []
+    match = first_match(top_evidence, gold_evidence)
     return {
         "case_id": case["case_id"],
         "assignment_id": assignment_id,
@@ -164,8 +186,9 @@ def evaluate_case(case: dict[str, Any], *, keep_collections: bool) -> dict[str, 
         "routing_mode": routing_mode,
         "chunks_indexed": chunks_indexed,
         f"hit_at_{top_k}": match is not None,
+        "gold_count": len(gold_evidence),
         "first_match": match,
-        "gold_evidence": case.get("gold_evidence") or [],
+        "gold_evidence": gold_evidence,
         "top_evidence": [compact_evidence(item, rank) for rank, item in enumerate(top_evidence, start=1)],
     }
 

@@ -108,7 +108,7 @@ A：我在项目里准备了离线评测脚本 `agent-python/evals/eval_harness.
 - `rewrite_trigger_rate`：自动改写触发率。
 - `rerank_comparison`：对比 baseline 和 rerank 策略。
 
-已有 hard case 中，加入 rerank 后 Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 29.8% 降到 15.3%。这说明检索链路不是只凭主观感觉调 prompt，而是可以用指标驱动优化。
+已有 hard case 中，加入 BM25 Hybrid 和 rerank 后 Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 29.8% 降到 15.3%。这说明检索链路不是只凭主观感觉调 prompt，而是可以用指标驱动优化。
 
 ## 四、任务类型识别与 Skill 体系
 
@@ -426,9 +426,9 @@ A：我会说这个项目的 Agent Loop 是自研的轻量工作流，不是因�
 
 面试里可以补一句：如果后续要做更复杂的多角色协作，比如 Planner、Retriever、Writer、Reviewer、Citation Verifier 分离，并且存在多轮条件跳转，我会考虑引入 LangGraph；但当前阶段我优先选择轻量实现，保证稳定性和可观测性。
 
-### Q36：简历里写 Qwen3-Rerank、Hit Rate@5 和 Unsupported Claim Rate，面试官可能会问这些指标怎么算？
+### Q36：简历里写 BM25 Hybrid、Qwen3-Rerank、Hit Rate@5 和 Unsupported Claim Rate，面试官可能会问这些指标怎么算？
 
-A：Hit Rate@5 衡量的是检索质量。对于每条 hard eval case，我会预先标注或判断哪些资料片段是回答这个任务必须召回的证据。如果 Top-5 检索结果里命中了关键证据，就算 hit。加入 Qwen3-Rerank 后，Hit Rate@5 从 50% 提升到 85%，说明 rerank 能把更相关的片段排到前面。
+A：Hit Rate@5 衡量的是检索质量。对于每条 hard eval case，我会预先标注回答任务必须召回的关键证据；如果 Top-5 检索结果里命中了关键证据，就算 hit。当前混合检索把 Chroma cosine 距离先转换为相似度，再和 BM25 关键词分数分别归一化，最终按向量相似度 60%、BM25 40% 融合；再接 Qwen3-Rerank 做排序优化。评测中 Hit Rate@5 从 50% 提升到 85%，说明排序链路能把更相关的证据片段排到前面。
 
 Unsupported Claim Rate 衡量的是生成可靠性。我会抽取或人工检查报告中的关键结论，看它们是否能被检索证据支撑。如果报告提出了材料里没有依据的结论，就计入 unsupported claim。这个指标从 29.8% 降到 15.3%，说明更好的检索排序能减少模型基于不充分上下文进行发挥。
 

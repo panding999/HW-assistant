@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import time
 from typing import Iterable
+import urllib.error
+import urllib.request
 
 import chromadb
 from fastapi import FastAPI, HTTPException
@@ -47,6 +49,7 @@ class IndexRequest(BaseModel):
 class IndexResponse(BaseModel):
     assignment_id: int
     chunks_indexed: int
+    parent_chunks: list["ParentChunkRecord"] = []
 
 
 class DeleteCollectionResponse(BaseModel):
@@ -93,6 +96,16 @@ class IndexedChunk(BaseModel):
     id: str
     document: str
     metadata: dict[str, str | int | float | bool]
+
+
+class ParentChunkRecord(BaseModel):
+    id: str
+    assignment_id: int
+    material_id: int
+    filename: str
+    parent_index: int
+    section_title: str
+    content: str
 
 
 app = FastAPI(title="FZU Homework Agent", version="0.1.0")
@@ -220,16 +233,13 @@ def chunk_text(text: str, chunk_size: int = 900, overlap: int = 160) -> list[str
 
 def build_index_chunks(assignment_id: int, material: MaterialRef, text: str) -> list[IndexedChunk]:
     sections = split_material_sections(material.filename, text)
-    document_summary = summarize_for_index(text, 700)
-    document_outline = outline_for_sections(sections)
+    document_summary = framework_summary_for_index(material.filename, text, sections)
     key_terms = "、".join(extract_keywords(" ".join([material.filename, text]))[:18])
     chunks: list[IndexedChunk] = []
     for parent_index, section in enumerate(sections):
         section_title = section["title"]
         section_text = section["text"]
         parent_id = f"{material.id}-p{parent_index}"
-        parent_excerpt = summarize_for_index(section_text, 1200)
-        section_summary = summarize_for_index(section_text, 420)
         for chunk_index, chunk in enumerate(chunk_text(section_text)):
             chunks.append(
                 IndexedChunk(
@@ -244,15 +254,32 @@ def build_index_chunks(assignment_id: int, material: MaterialRef, text: str) -> 
                         "chunk_index": chunk_index,
                         "parent_index": parent_index,
                         "source_type": "child",
-                        "parent_excerpt": parent_excerpt,
                         "document_summary": document_summary,
-                        "document_outline": document_outline,
-                        "section_summary": section_summary,
                         "key_terms": key_terms,
                     },
                 )
             )
     return chunks
+
+
+def build_parent_chunks(assignment_id: int, material: MaterialRef, text: str) -> list[ParentChunkRecord]:
+    records: list[ParentChunkRecord] = []
+    for parent_index, section in enumerate(split_material_sections(material.filename, text)):
+        section_text = section["text"].strip()
+        if not section_text:
+            continue
+        records.append(
+            ParentChunkRecord(
+                id=f"{material.id}-p{parent_index}",
+                assignment_id=assignment_id,
+                material_id=material.id,
+                filename=material.filename,
+                parent_index=parent_index,
+                section_title=section["title"],
+                content=section_text,
+            )
+        )
+    return records
 
 
 def split_material_sections(filename: str, text: str) -> list[dict[str, str]]:
@@ -322,6 +349,68 @@ def outline_for_sections(sections: list[dict[str, str]]) -> str:
     for index, section in enumerate(sections[:12], start=1):
         lines.append(f"{index}. {section['title']}：{summarize_for_index(section['text'], 120)}")
     return "\n".join(lines)
+
+
+def framework_summary_for_index(filename: str, text: str, sections: list[dict[str, str]], max_chars: int = 900) -> str:
+    clean = " ".join((text or "").split())
+    headings = [section["title"].strip() for section in sections if section.get("title", "").strip()]
+    representative: list[str] = []
+    if sections:
+        selected = [sections[0]]
+        if len(sections) > 2:
+            selected.append(sections[len(sections) // 2])
+        if len(sections) > 1:
+            selected.append(sections[-1])
+        seen_titles: set[str] = set()
+        for section in selected:
+            title = section["title"].strip()
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+            sentence = first_representative_sentence(section["text"])
+            if sentence:
+                representative.append(f"{title}：{sentence}")
+    else:
+        representative.extend(extract_representative_sentences(clean, 3))
+
+    terms = extract_keywords(" ".join([filename, clean]))[:12]
+    parts = [
+        f"文档：{filename}",
+        "框架：" + " / ".join(headings[:10]) if headings else "",
+        "要点：" + "；".join(representative[:5]) if representative else "",
+        "关键词：" + "、".join(terms) if terms else "",
+    ]
+    summary = "\n".join(part for part in parts if part.strip())
+    if len(summary) <= max_chars:
+        return summary
+    lines: list[str] = []
+    total = 0
+    for line in summary.splitlines():
+        if total + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines) or summary[:max_chars].rstrip()
+
+
+def first_representative_sentence(text: str) -> str:
+    sentences = extract_representative_sentences(text, 1)
+    return sentences[0] if sentences else ""
+
+
+def extract_representative_sentences(text: str, limit: int) -> list[str]:
+    clean = " ".join((text or "").split())
+    pieces = [part.strip() for part in re.split(r"(?<=[。！？.!?])\s*", clean) if part.strip()]
+    if not pieces and clean:
+        pieces = [clean]
+    result: list[str] = []
+    for piece in pieces:
+        if len(piece) < 8 and len(pieces) > 1:
+            continue
+        result.append(summarize_for_index(piece, 180))
+        if len(result) >= limit:
+            break
+    return result
 
 
 def summarize_for_index(text: str, max_chars: int) -> str:
@@ -725,6 +814,33 @@ def reset_assignment_collection(assignment_id: int):
     return client.get_or_create_collection(name=name, metadata=collection_metadata())
 
 
+def backend_base_url() -> str:
+    return os.getenv("BACKEND_BASE_URL", "http://localhost:8080").rstrip("/")
+
+
+def fetch_parent_chunks(assignment_id: int, parent_ids: list[str]) -> dict[str, str]:
+    ids = [parent_id for parent_id in parent_ids if parent_id]
+    if not ids:
+        return {}
+    payload = json.dumps({"parent_ids": ids}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"{backend_base_url()}/api/internal/assignments/{assignment_id}/parent-chunks/lookup",
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=float(os.getenv("BACKEND_PARENT_CHUNK_TIMEOUT_SECONDS", "10"))) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        logger.warning("parent_chunk_lookup_failed assignment_id=%s parent_count=%s", assignment_id, len(ids))
+        return {}
+    chunks = data.get("chunks") if isinstance(data, dict) else {}
+    if not isinstance(chunks, dict):
+        return {}
+    return {str(key): str(value) for key, value in chunks.items() if value is not None}
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -754,9 +870,11 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
     ids: list[str] = []
     documents: list[str] = []
     metadatas: list[dict[str, str | int | float | bool]] = []
+    parent_chunks: list[ParentChunkRecord] = []
 
     for material in payload.materials:
         text = read_material_text(material)
+        parent_chunks.extend(build_parent_chunks(payload.assignment_id, material, text))
         for chunk in build_index_chunks(payload.assignment_id, material, text):
             ids.append(chunk.id)
             documents.append(chunk.document)
@@ -764,7 +882,7 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
 
     if not documents:
         logger.info("index_done assignment_id=%s chunks=0", payload.assignment_id)
-        return IndexResponse(assignment_id=payload.assignment_id, chunks_indexed=0)
+        return IndexResponse(assignment_id=payload.assignment_id, chunks_indexed=0, parent_chunks=[])
 
     embeddings = embed_texts(documents)
     collection.upsert(
@@ -779,7 +897,9 @@ def index_materials(payload: IndexRequest) -> IndexResponse:
         len(documents),
     )
     return IndexResponse(
-        assignment_id=payload.assignment_id, chunks_indexed=len(documents)
+        assignment_id=payload.assignment_id,
+        chunks_indexed=len(documents),
+        parent_chunks=parent_chunks,
     )
 
 
@@ -830,6 +950,7 @@ def execute_generate_report(payload: ReportRequest, event_sink=None) -> ReportRe
         collection=collection,
         query=queries,
         embed_texts=embed_texts,
+        parent_chunk_loader=lambda parent_ids: fetch_parent_chunks(payload.assignment_id, parent_ids),
         llm_client=llm_client,
         quality_llm_client=evaluator_client,
         evaluator_model=evaluator_model(),
@@ -897,6 +1018,7 @@ def execute_improve_report(payload: ImproveReportRequest, event_sink=None) -> Re
         current_markdown=payload.current_markdown,
         current_quality=payload.current_quality,
         embed_texts=embed_texts,
+        parent_chunk_loader=lambda parent_ids: fetch_parent_chunks(payload.assignment_id, parent_ids),
         llm_client=llm_client,
         quality_llm_client=evaluator_client,
         evaluator_model=evaluator_model(),

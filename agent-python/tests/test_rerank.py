@@ -25,7 +25,7 @@ class RerankCollection:
                     {"material_id": 3, "filename": "c.md", "section_title": "C"},
                 ]
             ],
-            "distances": [[0.1, 0.9, 0.2]],
+            "distances": [[0.1, 0.9, 0.6]],
         }
 
 
@@ -39,11 +39,12 @@ class RerankSearchTests(unittest.TestCase):
 
         def fake_rerank(query_text, evidence):
             self.assertIn("target query", query_text)
-            evidence[1].rerank_score = 0.99
-            evidence[1].rerank_model = "qwen3-rerank"
-            evidence[0].rerank_score = 0.10
-            evidence[2].rerank_score = 0.20
-            return [evidence[1], evidence[2], evidence[0]]
+            by_id = {item.chunk_id: item for item in evidence}
+            by_id["doc-b"].rerank_score = 0.99
+            by_id["doc-b"].rerank_model = "qwen3-rerank"
+            by_id["doc-a"].rerank_score = 0.10
+            by_id["doc-c"].rerank_score = 0.20
+            return [by_id["doc-b"], by_id["doc-c"], by_id["doc-a"]]
 
         with patch.dict(
             os.environ,

@@ -47,7 +47,6 @@ def rerank_document(item: Any) -> str:
         for part in [
             f"文件：{getattr(item, 'filename', '')}",
             f"章节：{getattr(item, 'section_title', '')}",
-            f"章节摘要：{getattr(item, 'section_summary', '')}",
             f"证据片段：{getattr(item, 'excerpt', '')}",
         ]
         if part.strip("：")

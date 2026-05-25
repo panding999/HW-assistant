@@ -5,6 +5,7 @@ import com.fzu.homework.domain.AgentTask;
 import com.fzu.homework.domain.Assignment;
 import com.fzu.homework.domain.Material;
 import com.fzu.homework.domain.Report;
+import com.fzu.homework.dto.ParentChunkRecord;
 import com.fzu.homework.mapper.AgentTaskMapper;
 import com.fzu.homework.mapper.AssignmentMapper;
 import com.fzu.homework.mapper.MaterialMapper;
@@ -43,6 +44,7 @@ public class AgentWorkflowService {
     private final TaskLogService taskLogService;
     private final AgentStreamEventProcessor agentStreamEventProcessor;
     private final ObjectMapper objectMapper;
+    private final ParentChunkService parentChunkService;
 
     public AgentWorkflowService(
             AgentTaskMapper taskMapper,
@@ -53,6 +55,7 @@ public class AgentWorkflowService {
             TaskLogService taskLogService,
             AgentStreamEventProcessor agentStreamEventProcessor,
             ObjectMapper objectMapper,
+            ParentChunkService parentChunkService,
             @Value("${agent.base-url}") String agentBaseUrl
     ) {
         this.taskMapper = taskMapper;
@@ -63,6 +66,7 @@ public class AgentWorkflowService {
         this.taskLogService = taskLogService;
         this.agentStreamEventProcessor = agentStreamEventProcessor;
         this.objectMapper = objectMapper;
+        this.parentChunkService = parentChunkService;
     }
 
     public AgentTask createReportTask(Long assignmentId) {
@@ -175,9 +179,11 @@ public class AgentWorkflowService {
                     .body(Map.class);
             Object chunkValue = indexResponse == null ? 0 : indexResponse.get("chunks_indexed");
             int chunks = chunkValue instanceof Number ? ((Number) chunkValue).intValue() : 0;
+            List<ParentChunkRecord> parentChunks = parentChunksFromIndexResponse(indexResponse);
             if (chunks == 0) {
                 throw new IllegalStateException("资料无法提取有效文本，请上传可复制文本的 PDF、Markdown 或 TXT 后重试。");
             }
+            parentChunkService.replaceAssignmentParentChunks(assignment.getId(), parentChunks);
             log.info(
                     "report_task_stage_done taskId={} assignmentId={} stage=parse chunks={} durationMs={}",
                     taskId,
@@ -422,6 +428,7 @@ public class AgentWorkflowService {
                     .body(Map.class);
             Object chunkValue = indexResponse == null ? 0 : indexResponse.get("chunks_indexed");
             int chunks = chunkValue instanceof Number ? ((Number) chunkValue).intValue() : 0;
+            List<ParentChunkRecord> parentChunks = parentChunksFromIndexResponse(indexResponse);
             if (chunks == 0) {
                 throw new IllegalStateException("资料无法提取有效文本，请上传可复制文本的 PDF、Markdown 或 TXT 后重试。");
             }
@@ -431,6 +438,7 @@ public class AgentWorkflowService {
                 materialMapper.updateById(material);
             });
             taskLogService.push(taskId, currentStage, "SUCCEEDED", "最新资料解析完成，已向量化 " + chunks + " 个资料片段。");
+            parentChunkService.replaceAssignmentParentChunks(assignment.getId(), parentChunks);
             log.info(
                     "improve_task_stage_done taskId={} assignmentId={} stage=parse chunks={} durationMs={}",
                     taskId,
@@ -557,6 +565,15 @@ public class AgentWorkflowService {
             log.warn("agent_response_json_serialize_failed type={}", value.getClass().getName(), ex);
             return null;
         }
+    }
+
+    private List<ParentChunkRecord> parentChunksFromIndexResponse(Map<?, ?> indexResponse) {
+        if (indexResponse == null || !(indexResponse.get("parent_chunks") instanceof List<?> parentChunks)) {
+            return List.of();
+        }
+        return parentChunks.stream()
+                .map(item -> objectMapper.convertValue(item, ParentChunkRecord.class))
+                .toList();
     }
 
     private int listSize(Object value) {

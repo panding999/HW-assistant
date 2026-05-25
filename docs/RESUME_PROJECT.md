@@ -20,13 +20,13 @@ Spring Boot 3、Java 21、MyBatis Plus、MySQL、Redis、SSE、FastAPI、NDJSON�
 
 - 设计并实现 Agent 生成工作流，将一次报告生成拆分为资料索引、任务类型识别、RAG 检索、报告生成、质量检查、补充检索、自动改写、结果落库等阶段；Python Agent 通过 NDJSON 回传逐阶段事件，Java 后端转发为 SSE 日志并提供非流式 fallback，同时持久化 Trace、检索证据、质量评分和改写采纳结果，提升生成过程的实时性和可解释性。
 
-- 搭建基于 ChromaDB 的 assignment-scoped RAG 检索链路，按作业维度隔离并重建向量索引，避免历史资料残留导致召回污染；支持 PDF / Markdown / TXT 结构化切分、全文摘要、章节摘要、Parent-Child Retrieval、Multi-Query Retrieval、Qwen3-Rerank 和 cosine + keyword 的轻量 Hybrid Score 重排，从作业信息、Skill、章节、报告计划和关键词五路构造 query，按 `chunk_id` 去重后取 Top-K 原文证据入上下文；当质量门控发现证据不足、章节缺失或 grounding 偏低时，最多触发一轮补充检索并重生成候选稿，形成轻量 Agentic RAG 闭环。
+- 搭建基于 ChromaDB + MySQL 的 assignment-scoped RAG 检索链路，按作业维度隔离并重建向量索引，避免历史资料残留导致召回污染；支持 PDF / Markdown / TXT 结构化切分、规则生成全文框架摘要、Parent-Child Retrieval、Multi-Query Retrieval、Qwen3-Rerank 和 Hybrid Score 重排，其中混合检索按归一化向量相似度 `60%` + BM25 关键词得分 `40%` 融合；子 chunk 在向量库仅保存 `parent_id` 等轻量 metadata，需要父上下文时回查 MySQL 中的完整父 chunk 原文，减少摘要失真和元数据冗余。
 
 - 设计任务类型识别机制，结合规则路由与 LLM 路由识别论文总结、实验报告、课程问答和动态规划等生成策略，并将路由原因、置信度和匹配结果以中文日志展示，降低 Agent 黑盒感，便于用户理解系统为何选择当前生成流程。
 
 - 实现 Workflow 编排下的独立质量审稿与自动改写机制，生成/规划/改写使用主模型链路，质量审稿可单独配置 evaluator 模型；围绕结构完整性、证据贴合度、表达具体性、可编辑成熟度和低风险五个维度进行加权审稿，总分由本地规则重算，并结合章节完整率、检索证据数量和占位符检测缓解模型自评虚高。低于阈值时优先判断是否需要补充检索，随后触发一次最小必要改写，改写后重新评分，仅采纳质量更高版本，避免“越改越差”。
 
-- 构建 20 条 hard eval case 评测集，覆盖实验报告、论文总结、课程问答和动态规划任务；完成 baseline 与 Qwen3-Rerank 对照实验，`Hit Rate@5` 从 `50%` 提升到 `85%`，`Unsupported Claim Rate` 从 `29.8%` 降至 `15.3%`，验证 rerank 对证据召回和生成可靠性的改善。
+- 构建 20 条 hard eval case 评测集，覆盖实验报告、论文总结、课程问答和动态规划任务；完成 baseline、BM25 Hybrid 与 Qwen3-Rerank 检索评测，`Hit Rate@5` 从 `50%` 提升到 `85%`，`Unsupported Claim Rate` 从 `29.8%` 降至 `15.3%`，验证检索排序对证据召回和生成可靠性的改善。
 
 - 实现草稿再次优化链路：用户编辑报告或新增资料后，系统先保存当前草稿，并使用上一版已保存质量分作为 baseline，再把当前草稿、原始草稿、检索证据和质量反馈一起交给 Agent 生成新草稿；只评估候选稿，候选稿评分未超过 baseline 时保留原稿并向用户说明原因，降低人工编辑成果被低质量改写覆盖的风险；失败任务重试时保留原始操作类型，避免“再次优化”误重试为“重新生成”。
 

@@ -45,10 +45,7 @@ class HybridParentCollection:
                     "filename": "requirements.md",
                     "section_title": "keyword section",
                     "parent_id": "10-p0",
-                    "parent_excerpt": "parent context with alpha beta keyword rich details",
-                    "section_summary": "section summary",
                     "document_summary": "document summary",
-                    "document_outline": "1. keyword section",
                     "key_terms": "alpha beta keyword",
                 },
                 {
@@ -56,10 +53,37 @@ class HybridParentCollection:
                     "filename": "other.md",
                     "section_title": "other",
                     "parent_id": "11-p0",
-                    "parent_excerpt": "other parent",
                 },
             ]],
-            "distances": [[0.9, 0.01]],
+            "distances": [[0.2, 0.2]],
+        }
+
+    def get(self, ids, include):
+        raise AssertionError("parent chunks should be loaded from MySQL, not Chroma")
+
+
+class HybridWeightCollection:
+    def query(self, query_embeddings, n_results, include):
+        return {
+            "ids": [["vector-only", "keyword-only"]],
+            "documents": [["unrelated vector document", "target target target evidence"]],
+            "metadatas": [[
+                {"material_id": 1, "filename": "vector.md"},
+                {"material_id": 2, "filename": "keyword.md", "key_terms": "target"},
+            ]],
+            "distances": [[0.0, 1.0]],
+        }
+
+
+class MissingParentCollection:
+    def query(self, query_embeddings, n_results, include):
+        return {
+            "ids": [["10-0"]],
+            "documents": [["child target text"]],
+            "metadatas": [[
+                {"material_id": 10, "filename": "requirements.md", "source_type": "child", "parent_id": "10-p0"},
+            ]],
+            "distances": [[0.2]],
         }
 
 
@@ -709,13 +733,41 @@ class AgentRuntimeTests(unittest.TestCase):
             [SearchQuery(name="keyword_query", text="alpha beta keyword")],
             top_k=2,
             embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+            parent_chunk_loader=lambda parent_ids: {
+                "10-p0": "full parent context with alpha beta keyword rich details and original section text",
+                "11-p0": "other full parent text",
+            },
         )
         self.assertEqual(result.parent_merged_hits, 2)
         self.assertEqual(result.evidence[0].chunk_id, "low-keyword")
         self.assertEqual(result.evidence[0].parent_id, "10-p0")
         self.assertEqual(result.evidence[0].section_title, "keyword section")
         self.assertGreater(result.evidence[0].keyword_score, result.evidence[1].keyword_score)
-        self.assertIn("parent context", result.evidence[0].excerpt)
+        self.assertIn("full parent context", result.evidence[0].excerpt)
+        self.assertNotIn("section summary", result.evidence[0].excerpt)
+
+    def test_hybrid_search_weights_normalized_vector_60_and_bm25_40(self) -> None:
+        result = search_materials(
+            HybridWeightCollection(),
+            [SearchQuery(name="keyword_query", text="target")],
+            top_k=2,
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+        )
+        by_id = {item.chunk_id: item for item in result.evidence}
+        self.assertAlmostEqual(by_id["vector-only"].hybrid_score, 0.6)
+        self.assertAlmostEqual(by_id["keyword-only"].hybrid_score, 0.4)
+        self.assertEqual(result.evidence[0].chunk_id, "vector-only")
+
+    def test_missing_parent_context_falls_back_to_child_excerpt(self) -> None:
+        result = search_materials(
+            MissingParentCollection(),
+            [SearchQuery(name="keyword_query", text="target")],
+            top_k=2,
+            embed_texts=lambda texts: [[0.1, 0.2] for _ in texts],
+            parent_chunk_loader=lambda parent_ids: {},
+        )
+        self.assertEqual([item.chunk_id for item in result.evidence], ["10-0"])
+        self.assertEqual(result.evidence[0].excerpt, "child target text")
 
     def test_dynamic_planner_adds_plan_step_before_retrieval(self) -> None:
         client = FakeClient()

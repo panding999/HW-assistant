@@ -24,6 +24,21 @@ CREATE TABLE IF NOT EXISTS materials (
   INDEX idx_material_assignment (assignment_id)
 );
 
+CREATE TABLE IF NOT EXISTS agent_parent_chunks (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  assignment_id BIGINT NOT NULL,
+  material_id BIGINT NOT NULL,
+  parent_id VARCHAR(120) NOT NULL,
+  filename VARCHAR(255) NOT NULL,
+  parent_index INT NOT NULL,
+  section_title VARCHAR(500),
+  content MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_parent_assignment_id (assignment_id, parent_id),
+  INDEX idx_parent_assignment (assignment_id),
+  INDEX idx_parent_material (material_id)
+);
+
 CREATE TABLE IF NOT EXISTS agent_tasks (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   assignment_id BIGINT NOT NULL,
