@@ -63,6 +63,8 @@ The script reads:
 agent-python/tests/fixtures/rag_eval/cases.json
 ```
 
+The fixture dataset is intentionally private and is not committed to the public repository. Keep `cases.json` and `materials/` locally when reproducing the hard eval numbers.
+
 It writes:
 
 ```text

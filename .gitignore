@@ -16,6 +16,10 @@ __pycache__/
 .venv/
 storage/
 agent-python/eval-results/
+agent-python/tests/fixtures/rag_eval/cases.json
+agent-python/tests/fixtures/rag_eval/materials/**
+!agent-python/tests/fixtures/rag_eval/materials/
+!agent-python/tests/fixtures/rag_eval/materials/.gitkeep
 
 .DS_Store
 Thumbs.db
