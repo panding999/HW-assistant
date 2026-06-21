@@ -337,7 +337,7 @@ python evals/eval_harness.py evals/sample_results.jsonl --k 5
 - `Unsupported Claim Rate`：baseline `29.8%` -> rerank `15.3%`
 - miss -> hit case：`7`，hit -> miss case：`0`
 
-如果要扩展评测集，可以继续在 `agent-python/tests/fixtures/rag_eval/cases.json` 中补充样本，并把对应材料放到 `agent-python/tests/fixtures/rag_eval/materials/`。
+如果要扩展评测集，可以在本地私有维护 `agent-python/tests/fixtures/rag_eval/cases.json`，并把对应材料放到 `agent-python/tests/fixtures/rag_eval/materials/`。评测样本和材料正文不提交到公开仓库，仓库只保留评测脚本、指标口径和可公开的汇总结果。
 
 ## 项目结构
 
