@@ -20,7 +20,7 @@ Spring Boot 3、Java 21、MyBatis Plus、MySQL、Redis、SSE、FastAPI、NDJSON�
 
 - 设计并实现 Agent 生成工作流，将一次报告生成拆分为资料索引、任务类型识别、RAG 检索、报告生成、质量检查、补充检索、自动改写、结果落库等阶段；Python Agent 通过 NDJSON 回传逐阶段事件，Java 后端转发为 SSE 日志并提供非流式 fallback，同时持久化 Trace、检索证据、质量评分和改写采纳结果，提升生成过程的实时性和可解释性。
 
-- 搭建基于 ChromaDB + MySQL 的 assignment-scoped RAG 检索链路，按作业维度隔离并重建向量索引，避免历史资料残留导致召回污染；支持 PDF / Markdown / TXT 结构化切分、规则生成全文框架摘要、Parent-Child Retrieval、Multi-Query Retrieval、Qwen3-Rerank 和 Hybrid Score 重排，其中混合检索按归一化向量相似度 `60%` + BM25 关键词得分 `40%` 融合；子 chunk 在向量库仅保存 `parent_id` 等轻量 metadata，需要父上下文时回查 MySQL 中的完整父 chunk 原文，减少摘要失真和元数据冗余。
+- 搭建基于 ChromaDB + MySQL 的 assignment-scoped RAG 检索链路，按作业维度隔离并重建向量索引，避免历史资料残留导致召回污染；支持 PDF / Markdown / TXT 结构化切分、规则生成全文框架摘要、Parent-Child Retrieval、确定性 Query Simplification、Qwen3-Rerank 和 Hybrid Score 重排，其中基础检索只保留 `assignment_query` / `structure_query`，动态 Planner 追加 `plan_query`，每路 query 同时执行向量召回和 BM25 child chunk 召回，并按归一化向量相似度 `60%` + BM25 关键词得分 `40%` 融合；子 chunk 在向量库仅保存 `parent_id` 等轻量 metadata，需要父上下文时回查 MySQL 中的完整父 chunk 原文，减少摘要失真和元数据冗余。
 
 - 设计任务类型识别机制，结合规则路由与 LLM 路由识别论文总结、实验报告、课程问答和动态规划等生成策略，并将路由原因、置信度和匹配结果以中文日志展示，降低 Agent 黑盒感，便于用户理解系统为何选择当前生成流程。
 

@@ -7,7 +7,7 @@
 
 当前项目的核心亮点已经比较清楚：基于 RAG 的资料检索、任务类型识别、Agent 生成、质量门控、自动改写、任务日志和数据监控。整体可以作为一个“可观测的作业报告生成 Agent 系统”来讲。
 
-本轮已修复部分会直接影响测试数据可信度和中文展示体验的问题：生成前会重建当前作业的 ChromaDB collection，删除作业时会请求清理向量集合，RAG 检索改为确定性多路 query 扩展，任务类型识别原因改为中文输出，监控指标拆分为任务完成率、质量通过率、改写触发率和改写采纳率。后续迭代又补充了质量反馈驱动的二次检索闭环、Python Agent 阶段事件流、再次优化版本保护、重试保留原任务类型和前端日志刷新兜底。
+本轮已修复部分会直接影响测试数据可信度和中文展示体验的问题：生成前会重建当前作业的 ChromaDB collection，删除作业时会请求清理向量集合，RAG 检索改为确定性基础 query 与向量/BM25 双路召回融合，任务类型识别原因改为中文输出，监控指标拆分为任务完成率、质量通过率、改写触发率和改写采纳率。后续迭代又补充了质量反馈驱动的二次检索闭环、Python Agent 阶段事件流、再次优化版本保护、重试保留原任务类型和前端日志刷新兜底。
 
 仍建议在简历和面试里保持克制：质量评分和引用覆盖仍是工程信号，不要包装成事实准确率；当前已做到逐阶段/逐工具完成事件流，但不是逐 token 流式输出，也不是所有阶段都有 start event。
 
@@ -113,20 +113,22 @@
 - 面试中可以称为“轻量 Agentic RAG：质量反馈驱动的一轮补充检索闭环”。
 - 不要包装成完整 LangGraph / Graph RAG / 多轮自主 Agent。
 
-### 6. RAG query 已采用确定性多路扩展，暂不做 LLM query rewrite
+### 6. RAG query 已收敛为确定性基础 query，暂不做 LLM query rewrite
 
 涉及文件：
 - `agent-python/app/main.py`
 
 现状：
-- 检索 query 已拆成三路：
+- 基础检索 query 已收敛为两路：
   - `assignment_query`：标题、课程、描述。
-  - `skill_query`：Skill 标签、必要章节、query_hint。
-  - `section_query`：必要章节和作业要求。
-- 多路检索后按 `chunk_id` 去重，再按相似度分数截断到 `top_k`。
+  - `structure_query`：Skill 标签、必要章节、query_hint 和作业结构要求。
+- 动态 Planner 已生成报告计划时，再追加一条 `plan_query`。
+- 每路 query 都执行 Chroma 向量召回和当前 assignment child chunks 上的 BM25 召回，按 `chunk_id` 合并候选。
+- 候选缺失向量命中时 `vector_score=0`，缺失 BM25 命中时 `bm25_score=0`；归一化后按 `0.6 * vector_norm + 0.4 * bm25_norm` 计算 `hybrid_score`。
+- 最终仍通过 `parent_id` 回查 MySQL 父 chunk 原文，Qwen3-Rerank 作为可选后置重排。
 
 优点：
-- 稳定、可解释、成本低，且比单 query 更容易覆盖不同资料区域。
+- 稳定、可解释、成本低；相比旧的 skill/section/keyword 拆分，query 类型更少，召回覆盖由“每路双路召回 + hybrid 融合”承担。
 
 不足：
 - 当前已支持基于质量问题的一轮补充检索，但仍不是开放式多轮规划，也不是 claim-level 检索。

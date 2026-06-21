@@ -10,8 +10,8 @@
 
 - **Assignment-scoped RAG**：每个作业使用独立 ChromaDB collection，命名为 `assignment_{id}`，生成报告时只检索当前作业上传的资料，避免不同课程、不同作业之间的资料污染。
 - **结构化索引与混合召回**：支持 PDF / Markdown / TXT 资料解析，按 Markdown 标题、PDF 页、段落块进行结构化切分；向量库子 chunk 仅写入 `section_title`、`parent_id`、关键词等轻量 metadata，全文摘要由规则提取标题框架、代表句和高频关键词生成。
-- **Cosine 向量检索 + BM25 Hybrid Score**：ChromaDB collection 显式使用 `hnsw:space=cosine`；检索时先向量召回候选，再对当前作业候选 chunk 做纯 Python BM25 关键词评分，按归一化向量相似度 `60%` + BM25 得分 `40%` 融合重排。
-- **Multi-Query Retrieval + Parent-Child Retrieval**：从作业描述、Skill、章节、报告计划、关键词 5 路构造 query；用 child chunk 精准命中，通过 `parent_id` 回查 MySQL 中的完整父 chunk 原文补足生成所需背景。
+- **Cosine 向量检索 + BM25 Hybrid Score**：ChromaDB collection 显式使用 `hnsw:space=cosine`；每路 query 同时执行 Chroma 向量召回和当前作业 child chunk 上的纯 Python BM25 召回，合并候选后按归一化向量相似度 `60%` + BM25 得分 `40%` 融合重排。
+- **Query Simplification + Parent-Child Retrieval**：基础检索只保留 `assignment_query` 和 `structure_query`；动态 Planner 有报告计划时追加 `plan_query`；用 child chunk 精准命中，通过 `parent_id` 回查 MySQL 中的完整父 chunk 原文补足生成所需背景。
 - **Skill Routing + Dynamic Planner**：支持实验报告、论文总结、课程问答等固定业务 Skill；低置信度任务进入 `dynamic_planner`，先生成报告大纲 / 章节计划，再基于计划检索和生成正文。
 - **ReAct-lite Agent Loop**：Python Agent 按固定上限执行 `plan`、`retrieve`、`generate`、`quality`、`rewrite` 等步骤，避免无限循环，并输出完整 `agent_trace`。
 - **轻量 Agentic RAG 闭环**：质量门控发现证据不足、章节缺失或 grounding 偏低时，最多触发 1 轮补充检索，合并新证据后重生成候选稿并重新评估，只采纳质量更高版本。
@@ -53,7 +53,7 @@ ChromaDB + Generator LLM + Evaluator LLM(optional) + DashScope Embedding
 6. Agent 解析资料，结构化切分 chunk，规则生成全文框架摘要和关键词；子 chunk 写入 ChromaDB，完整父 chunk 原文持久化到 MySQL。
 7. 后端优先调用 `/agent/generate-report-stream` 或 `/agent/improve-report-stream`，Agent 逐阶段返回 NDJSON 事件；流式不可用时回退非流式接口。
 8. 如果进入 `dynamic_planner`，Agent 先生成报告大纲 / 章节计划。
-9. Agent 构造多路 query，执行 cosine 向量召回、BM25 关键词评分、父子上下文合并和 hybrid score 重排。
+9. Agent 构造 `assignment_query`、`structure_query`，动态 Planner 场景追加 `plan_query`；每路 query 执行 cosine 向量召回和 BM25 child chunk 召回，合并候选后回查父 chunk 原文并按 hybrid score 重排。
 10. Agent 基于全文框架摘要、父 chunk 原文上下文和 Top-K 原文证据生成 Markdown 草稿。
 11. 质量门控使用 evaluator 审稿；若证据不足可触发一次补充检索，必要时自动改写一次，并保留更好版本。
 12. Java 后端保存报告、retrieved evidence、quality metrics 和 agent trace。
@@ -116,18 +116,22 @@ assignment_3 -> collection: assignment_3
 ```text
 全文框架摘要 + key terms
   +
-5 路 query:
+基础 query:
   assignment_query
-  skill_query
-  section_query
-  plan_query
-  keyword_query
+  structure_query
+  + plan_query(dynamic_planner only)
   ↓
-ChromaDB cosine vector search
+每路 query 双路召回:
+  ChromaDB cosine vector search
+  BM25 search over current assignment child chunks
   ↓
-Parent-Child 上下文合并
+vector candidates ∪ bm25 candidates
   ↓
-Qwen3-Rerank + Hybrid Score = rerank score + 0.6 * vector_norm + 0.4 * bm25_norm
+Parent-Child 上下文合并：parent_id 回查 MySQL 父 chunk 原文
+  ↓
+Hybrid Score = 0.6 * vector_norm + 0.4 * bm25_norm
+  ↓
+Qwen3-Rerank(optional)
   ↓
 Top-K 原文证据进入报告生成 prompt
 ```
@@ -364,7 +368,7 @@ python evals/eval_harness.py evals/sample_results.jsonl --k 5
 
 ## 适合写进简历的描述
 
-> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding、Qwen3-Rerank、ChromaDB 和 MySQL，实现作业级隔离 RAG、结构化资料索引、Multi-Query Retrieval、Parent-Child Retrieval、向量相似度 60% + BM25 关键词得分 40% 的 Hybrid Score 重排、Skill Routing、动态报告规划、模型质量门控、自动改写和报告版本保存；向量库子 chunk 仅保留 `parent_id` 等轻量 metadata，父上下文通过 MySQL 回查完整父 chunk 原文；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计；在 20 条 hard eval case 上，Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 29.8% 降至 15.3%。
+> 基于 Spring Boot + FastAPI + Next.js 构建课程作业 Agent 工作台，接入 DeepSeek OpenAI-compatible API、DashScope Embedding、Qwen3-Rerank、ChromaDB 和 MySQL，实现作业级隔离 RAG、结构化资料索引、确定性 Query Simplification、Parent-Child Retrieval、向量相似度 60% + BM25 关键词得分 40% 的 Hybrid Score 重排、Skill Routing、动态报告规划、模型质量门控、自动改写和报告版本保存；基础检索只保留 `assignment_query` 与 `structure_query`，动态 Planner 追加 `plan_query`，每路 query 同时执行向量召回和 BM25 child chunk 召回；向量库子 chunk 仅保留 `parent_id` 等轻量 metadata，父上下文通过 MySQL 回查完整父 chunk 原文；基于 MySQL 持久化 Agent Trace、检索证据和质量指标，构建可观测数据监控页，支持任务完成率、质量通过率、P95 耗时、改写率、阶段耗时和检索指标统计；在 20 条 hard eval case 上，Hit Rate@5 从 50% 提升到 85%，Unsupported Claim Rate 从 29.8% 降至 15.3%。
 
 ## 安全说明
 
